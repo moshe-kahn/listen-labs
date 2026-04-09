@@ -23,7 +23,14 @@ Planned MVP components:
 
 ## Status
 
-This repository is currently in the planning and documentation stage. There is no application code yet.
+This repository now includes the first implemented milestone:
+- minimal React frontend shell
+- FastAPI backend
+- Spotify OAuth login flow
+- session-based auth
+- authenticated Spotify profile test endpoint
+
+The broader analysis, scoring, ranking, and playlist features are still in planning.
 
 ---
 
@@ -42,6 +49,7 @@ ListenLab is built around **"signal over suggestion"**:
 - [Architecture](docs/architecture.md)
 - [Context](docs/context.md)
 - [Roadmap](docs/roadmap.md)
+- [Auth Milestone Notes](docs/auth-milestone.md)
 
 ---
 

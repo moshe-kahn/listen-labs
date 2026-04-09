@@ -4,7 +4,7 @@
 This roadmap translates the product brief into buildable engineering milestones. It is intentionally implementation-oriented and should be used alongside `docs/architecture.md` and `docs/context.md`.
 
 ## Planning Defaults
-- The repository starts with no implementation.
+- The repository now has a working auth-only foundation.
 - MVP uses a React frontend and FastAPI backend.
 - Spotify is the source of truth.
 - MVP uses no persistent database.
@@ -59,9 +59,15 @@ Enable a user to sign in with Spotify and give the backend a valid authenticated
 - the frontend can confirm authenticated state through the backend
 - the backend can make authenticated Spotify API calls on behalf of the user
 
+### Current status
+- Implemented and manually verified in local development.
+
 ## Milestone 2 - Data Collection and Artist Aggregation
 ### Purpose
 Collect the core library signals and normalize them into artist-level records.
+
+### Current status
+- Not started.
 
 ### Dependencies
 - Milestone 1

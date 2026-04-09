@@ -5,8 +5,10 @@ This document is the implementation-oriented technical source of truth for the L
 
 ## Current State vs Target State
 ### Current state
-- The repository currently contains documentation only.
-- There is no implemented frontend, backend, data model, or deployment configuration yet.
+- The repository now includes a minimal implemented auth milestone.
+- A React frontend shell and FastAPI backend are scaffolded locally.
+- Spotify OAuth login, callback handling, session persistence, and an authenticated `GET /me` test endpoint are implemented.
+- Analysis, aggregation, scoring, ranking, and playlist creation are not implemented yet.
 - Product intent is currently defined by the roadmap file at `../initial roadmap.txt` relative to the project root.
 
 ### Target MVP state
@@ -31,6 +33,13 @@ This document is the implementation-oriented technical source of truth for the L
 - API server: FastAPI application
 - External dependency: Spotify Web API
 - State model: session-based auth, on-demand computation, no persisted app data
+
+### Implemented today
+- frontend login shell
+- frontend callback handling
+- backend OAuth endpoints
+- backend token exchange and session storage
+- authenticated Spotify profile test endpoint
 
 ### High-level flow
 1. The user opens the React app and starts Spotify login.
@@ -175,6 +184,9 @@ Purpose:
 Purpose:
 - Run the full ListenLab analysis for the current user.
 
+Status:
+- Planned, not implemented yet.
+
 Request body:
 ```json
 {
@@ -198,6 +210,9 @@ Notes:
 ### `POST /playlist`
 Purpose:
 - Create a playlist from selected surfaced artists.
+
+Status:
+- Planned, not implemented yet.
 
 Request body:
 ```json
