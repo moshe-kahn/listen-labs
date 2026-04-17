@@ -17,11 +17,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
 
-from app.config import get_settings
-from app.history_analysis import clear_history_insights_cache, get_history_signature, load_history_insights
+from backend.app.config import get_settings
+from backend.app.db import apply_pending_migrations, ensure_sqlite_db
+from backend.app.history_analysis import clear_history_insights_cache, get_history_signature, load_history_insights
+from backend.app.logging_config import configure_logging
 
 settings = get_settings()
-logger = logging.getLogger("listenlab.auth")
+logger = logging.getLogger("listenlabs.auth")
 SECTION_PREVIEW_LIMIT = 10
 ALBUM_ANALYSIS_LIMIT = 10
 PLAYLIST_ANALYSIS_LIMIT = 10
@@ -70,7 +72,7 @@ app = FastAPI(title="ListenLab API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.allowed_origin],
+    allow_origins=settings.allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -81,6 +83,14 @@ app.add_middleware(
     same_site="lax",
     https_only=False,
 )
+
+
+@app.on_event("startup")
+async def _ensure_sqlite_db_on_startup() -> None:
+    log_file_path = configure_logging()
+    ensure_sqlite_db()
+    apply_pending_migrations()
+    logger.info("event=backend_ready sqlite_initialized=true debug_log=%s", log_file_path)
 
 
 def _is_configured() -> bool:

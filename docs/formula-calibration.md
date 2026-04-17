@@ -27,11 +27,18 @@ The local Spotify extended streaming history export provides:
 - `reason_end`
 - `skipped`
 - `shuffle`
+- `platform`
+- `offline`
+- `conn_country`
 
 This is enough to build strong all-time and recent artist/album rankings for calibration.
 
 Important limitation:
 - the export does not include playlist membership context for each play
+
+Current raw-ingest note:
+- the backend now persists these raw fields in `raw_play_event`
+- recent-play API rows do not have equivalent source-truth values for many of them and currently store `NULL`
 
 ## Ground-Truth Observations From History
 ### Artists

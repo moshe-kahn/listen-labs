@@ -18,8 +18,10 @@ class Settings:
     frontend_url: str
     session_secret: str
     allowed_origin: str
+    allowed_origins: list[str]
     spotify_history_dir: str
     cache_dir: str
+    sqlite_db_path: str
     spotify_scope: str = (
         "user-read-email user-read-private user-read-recently-played playlist-read-private "
         "user-follow-read user-library-read user-top-read streaming user-modify-playback-state "
@@ -44,16 +46,27 @@ def _read_env(name: str, default: str = "") -> str:
 
 
 def get_settings() -> Settings:
+    default_origin = _read_env("ALLOWED_ORIGIN", "http://127.0.0.1:5173")
+    configured_origins = _read_env("ALLOWED_ORIGINS", "")
+    if configured_origins:
+        allowed_origins = [origin.strip() for origin in configured_origins.split(",") if origin.strip()]
+    else:
+        allowed_origins = [default_origin, "http://localhost:5173"]
+    if default_origin not in allowed_origins:
+        allowed_origins.insert(0, default_origin)
+
     return Settings(
         spotify_client_id=_read_env("SPOTIFY_CLIENT_ID"),
         spotify_client_secret=_read_env("SPOTIFY_CLIENT_SECRET"),
         spotify_redirect_uri=_read_env("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8000/auth/callback"),
         frontend_url=_read_env("FRONTEND_URL", "http://127.0.0.1:5173"),
         session_secret=_read_env("SESSION_SECRET", "change-me"),
-        allowed_origin=_read_env("ALLOWED_ORIGIN", "http://127.0.0.1:5173"),
+        allowed_origin=default_origin,
+        allowed_origins=allowed_origins,
         spotify_history_dir=_read_env(
             "SPOTIFY_HISTORY_DIR",
             "C:\\Users\\kahnt\\OneDrive\\Programming\\Projects\\ListenLab\\Spotify Extended Streaming History",
         ),
         cache_dir=_read_env("CACHE_DIR", str(BACKEND_DIR / "data" / "cache")),
+        sqlite_db_path=_read_env("SQLITE_DB_PATH", str(BACKEND_DIR / "data" / "listenlabs.sqlite3")),
     )

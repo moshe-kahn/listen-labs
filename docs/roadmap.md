@@ -7,7 +7,7 @@ This roadmap translates the product brief into buildable engineering milestones.
 - The repository now has a working authenticated dashboard foundation.
 - MVP uses a React frontend and FastAPI backend.
 - Spotify is the source of truth.
-- MVP uses no persistent database.
+- MVP now uses a local SQLite database for raw ingest and sync-state persistence.
 - Local development comes first, with a simple cloud deployment path later.
 - The current dashboard also supports local cached operation when Spotify is rate-limited or intentionally disabled.
 
@@ -97,7 +97,12 @@ Ship a trustworthy authenticated dashboard that exposes the raw listening signal
 Collect the core library signals and normalize them into artist-level records.
 
 ### Current status
-- Partially started through dashboard-oriented fetches, but the true artist aggregation pipeline for overlooked-artist analysis is not implemented yet.
+- Partially started through dashboard-oriented fetches.
+- Raw listening ingest is now substantially further along:
+  - recent-play API ingest exists
+  - history-dump ingest exists
+  - same-source and cross-source raw upgrades exist
+- The true artist aggregation pipeline for overlooked-artist analysis is still not implemented yet.
 
 ### Dependencies
 - Milestone 2
@@ -105,10 +110,16 @@ Collect the core library signals and normalize them into artist-level records.
 ### Deliverables
 - Spotify client support for liked tracks, saved albums, and followed artists
 - pagination handling for required Spotify endpoints
+- raw event ingestion from Spotify recent-play API into SQLite
+- raw event ingestion from Spotify extended streaming history into SQLite
+- conservative replay overlap and early-stop paging for recent-play sync
+- source-row idempotency plus conservative cross-source upgrade matching
 - aggregation pipeline that produces `ArtistProfile` records
 - unit-tested normalization logic for multi-artist tracks and album relationships
 
 ### Completion criteria
+- recent-play sync can ingest new rows and safely replay overlap windows
+- history-dump import can upgrade weaker recent-play estimates into source-truth rows
 - the backend can build a complete artist-level aggregate from the required MVP data
 - followed state, liked tracks, and saved album counts are reflected correctly per artist
 
@@ -124,6 +135,9 @@ Add listening-behavior signals while preserving useful output when rich data is 
 - derived listening-minute and play-count fields on `ArtistProfile`
 - explicit scoring-mode selection between rich-signal and fallback execution
 - tests covering partial signal availability
+- chronology-based `ms_played` improvement for recent-play API rows
+- explicit duration provenance with method precedence:
+  - `history_source > api_chronology > default_guess`
 
 ### Completion criteria
 - the analysis pipeline can run with rich signals when available
@@ -212,6 +226,25 @@ These are active issues discovered during current dashboard work and should be t
 - Specifically fix the incorrect history count still shown for "Chronicles of a Diamond."
 - Improve local-mode image persistence so artist and album artwork remains available after switching out of full mode.
 - Continue tightening documentation and instrumentation around cache behavior and local-mode freshness.
+- Continue tightening documentation and instrumentation around raw ingest performance and batch import timing.
+
+## Current Raw Ingest Status
+- `raw_play_event`, `ingest_run`, and `spotify_sync_state` are implemented in SQLite.
+- `ms_played_method` is implemented with:
+  - `history_source`
+  - `api_chronology`
+  - `default_guess`
+- recent-play API rows can upgrade from `default_guess` to `api_chronology`
+- history-dump rows can upgrade API rows to `history_source`
+- current conservative cross-source identity is:
+  - canonical UTC `played_at`
+  - plus `spotify_track_id` if available, otherwise `spotify_track_uri`
+- current history-file import path has instrumentation for:
+  - file discovery
+  - per-file read and parse time
+  - mapping time
+  - DB ingest time
+  - total elapsed time
 
 ## Post-MVP Backlog
 These items are explicitly deferred until after the MVP is stable.

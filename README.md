@@ -32,6 +32,9 @@ This repository now includes:
 - local history-based artist and album ranking calibration using exported Spotify extended streaming history
 - section-level caching for live data, history-derived favorites, history enrichment, and saved Spotify-only sections
 - on-disk local analysis cache plus shared static metadata cache for artist and album artwork
+- SQLite-backed raw play-event ingestion with schema migrations
+- Spotify recent-play ingest with replay overlap, conservative early-stop paging, and chronology-based `ms_played` estimation
+- Spotify history-dump ingest with cross-source upgrade support into the same raw-play table
 - a post-login loading handoff plus sticky dashboard navigation, account/project popovers, and multiple dashboard UI polish passes
 
 The core overlooked-artist analysis flow and playlist generation are still not implemented.
@@ -58,6 +61,7 @@ ListenLab is built around **"signal over suggestion"**:
 - [Architecture](docs/architecture.md)
 - [Context](docs/context.md)
 - [Roadmap](docs/roadmap.md)
+- [Raw Ingest](docs/raw-ingest.md)
 - [Formula Calibration](docs/formula-calibration.md)
 - [Auth Milestone Notes](docs/auth-milestone.md)
 
@@ -68,6 +72,8 @@ ListenLab is built around **"signal over suggestion"**:
 Build toward a web app that:
 - connects to a user's Spotify account
 - builds reliable artist and album signals from live Spotify data
+- persists raw play events from both Spotify recent-play API data and Spotify extended streaming history
+- upgrades weaker raw duration estimates when better source data arrives later
 - calibrates scoring heuristics against exported listening history when available
 - remains usable in a local cached mode when Spotify is unavailable or rate-limited
 - eventually ranks overlooked artists by actual engagement
@@ -82,5 +88,19 @@ Build toward a web app that:
 - local exported history can be used for scoring calibration and local-mode fallback, not as a required product dependency
 - recent sections should stay fresh while stable favorites and saved Spotify-only sections can come from cache
 - analysis runs on demand
-- no standalone application database in MVP beyond local cache files
+- use a local SQLite database for raw event ingestion, sync state, and ingest runs
 - local development first, simple cloud deployment later
+
+## Current Ingest Design
+
+- `raw_play_event` stores source-faithful play rows from Spotify recent-play API ingest and Spotify history-dump ingest
+- `ingest_run` tracks each import/sync run
+- `spotify_sync_state` tracks recent-play replay boundaries and sync lifecycle metadata
+- recent-play rows start with `ms_played_method = default_guess` and can improve to `api_chronology`
+- history-dump rows ingest with `ms_played_method = history_source`
+- method precedence is:
+  - `history_source > api_chronology > default_guess`
+- dedupe and upgrade matching is:
+  - exact `source_row_key` first
+  - then conservative `cross_source_event_key`
+- `cross_source_event_key` currently uses canonical UTC `played_at` plus Spotify track identity

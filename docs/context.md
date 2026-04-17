@@ -59,6 +59,7 @@ Current note:
 - that dashboard is being used as product calibration and UX groundwork, not as the final overlooked-artist MVP experience
 - the dashboard now includes a loading handoff after Spotify auth plus a persistent top navigation bar for jumping between sections
 - the dashboard also supports a restricted local mode so saved history- and cache-backed sections remain usable when Spotify is unavailable or rate-limited
+- the backend now also persists raw play events from both Spotify recent-play API data and Spotify extended streaming history in a local SQLite database
 
 ## Domain Vocabulary
 ### Overlooked artist
@@ -66,6 +67,15 @@ An artist the user clearly engages with but does not currently follow. This is t
 
 ### Engagement signal
 A measurable piece of user behavior or library state that contributes to artist ranking. Examples include listening minutes, play count, liked track count, saved album count, and recency.
+
+### Raw play event
+The source-faithful unit of listening ingestion stored before higher-level artist or album aggregation. Raw play events may start with an estimated duration and later be upgraded when a better source arrives.
+
+### Source-row idempotency
+The rule that the exact same source event should not be inserted twice. This is currently enforced with `source_row_key`.
+
+### Cross-source upgrade
+The rule that the same logical listen can be improved by a better source later. This is currently handled conservatively through `cross_source_event_key`.
 
 ### `ArtistProfile`
 The internal artist-level aggregate that combines all gathered signals into one normalized record. This is the canonical unit for scoring.
@@ -85,6 +95,7 @@ The selected set of surfaced artist IDs plus playlist settings such as name and 
 - Do not rely on liked tracks alone.
 - Treat listening behavior as a first-class signal whenever available.
 - Provide a useful fallback when listening-time data is incomplete.
+- Preserve the difference between estimated play duration and source-truth play duration.
 
 ## Why Explanations Matter
 Explanation is not decorative UI. It is part of the product value.
@@ -104,14 +115,15 @@ Good result:
 4. Backend gathers available Spotify signals and, when available locally, compares them to exported listening history for calibration.
 5. Frontend shows ranked artists, tracks, albums, playlists, recent activity, and playback controls where available.
 6. If Spotify is limited or intentionally disabled, the frontend can fall back to local cached sections and clearly indicate when cached data may be stale.
-7. A later milestone will add overlooked-artist analysis and playlist generation.
+7. Raw event ingestion can continue through recent-play sync and history-dump import paths.
+8. A later milestone will add overlooked-artist analysis and playlist generation.
 
 ## Data Availability Constraints
 Spotify may not expose every signal needed for perfect behavioral measurement.
 
 Implementation should therefore assume:
 - some users will have richer listening history than others
-- listening minutes may be partial or approximated
+- listening minutes may be partial, approximated, or later upgraded
 - play counts may need proxy or recent-history logic
 - results still need to feel correct even under fallback conditions
 
@@ -138,11 +150,11 @@ The MVP succeeds when:
 
 ## Defaults for Implementers
 - Optimize for one user analyzing their own account.
-- Assume no persistent database in MVP.
 - Keep scoring weights configurable in code, not in the public UI.
 - Keep the backend as the owner of ranking, filtering, and explanation generation.
 - Keep Spotify as the source of truth rather than copying user data into app storage.
 - Use local runtime caches and snapshot files to preserve usability during rate limits or local-only sessions.
+- Use the local SQLite store for raw ingest, sync state, and ingest-run bookkeeping.
 
 ## Current Follow-Ups
 - Fix album breadth/counting so albums do not overcount duplicate or alternate track variants.

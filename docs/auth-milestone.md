@@ -16,6 +16,7 @@
 - optional local history calibration for artist and album rankings
 - section-level caching for live sections and persistent history-derived favorites
 - saved local snapshots for Spotify-only sections plus shared static metadata cache for artwork and URLs
+- local SQLite raw-ingest foundation for recent-play sync, history import, and sync-state tracking
 
 ## Status
 - Implemented
@@ -90,3 +91,4 @@ This is optional and intended for local calibration and richer artist/album rank
 ## Known next step
 - turn the current snapshot dashboard into the final overlooked-artist analysis experience with explanation-first ranking
 - fix outstanding album-ranking and local-image hydration bugs uncovered during the dashboard expansion work
+- continue improving raw ingest performance and use the resulting SQLite data as the base for later scoring work

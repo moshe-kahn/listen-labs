@@ -12,6 +12,9 @@ This document is the implementation-oriented technical source of truth for the L
 - A local exported-history analyzer can calibrate artist and album rankings from Spotify extended streaming history when a history directory is configured.
 - The dashboard uses a dedicated post-login loading screen, then swaps into a sticky-navigation dashboard shell.
 - Backend section-level caching is implemented for moderate-freshness live sections, long-lived history-derived favorites, shared static Spotify metadata, and saved user snapshot sections for local mode.
+- A local SQLite database now stores raw play events, ingest runs, and Spotify recent-sync state.
+- Spotify recent-play API ingest is implemented with replay overlap handling, conservative early-stop paging, and batch chronology-based `ms_played` upgrades.
+- Spotify extended history JSON ingest is implemented into the same raw-play table, with cross-source upgrade support from API-estimated rows to source-truth rows.
 - The core overlooked-artist analysis flow and playlist creation flow are still not implemented.
 
 ### Target MVP state
@@ -19,7 +22,7 @@ This document is the implementation-oriented technical source of truth for the L
 - A FastAPI backend handles Spotify OAuth, Spotify API orchestration, aggregation, scoring, explanation generation, and playlist creation.
 - Spotify is the source of truth for user library and listening-related signals.
 - Analysis is computed on demand for the active session.
-- No persistent application database is used in MVP.
+- A local SQLite database may persist raw ingest and sync-state data for analysis and calibration support.
 - Local development is the primary target, with a later path to simple cloud hosting for the frontend and a single backend service.
 
 ## Architectural Principles
@@ -29,13 +32,14 @@ This document is the implementation-oriented technical source of truth for the L
 - Always return an explanation for each surfaced result.
 - Prefer a small number of reliable system parts over early optimization.
 - Design for degraded-but-useful results when Spotify signal availability is limited.
+- Preserve provenance for raw listening data and make upgrades explicit when better source quality arrives later.
 
 ## MVP System Overview
 ### Runtime shape
 - Browser client: React SPA
 - API server: FastAPI application
 - External dependency: Spotify Web API
-- State model: session-based auth, on-demand computation, no persisted app data
+- State model: session-based auth, on-demand computation, plus local SQLite/raw-cache persistence
 
 ### Implemented today
 - frontend authenticated dashboard shell
@@ -53,6 +57,9 @@ This document is the implementation-oriented technical source of truth for the L
 - optional local history-based artist and album ranking calibration
 - section-level caching for live sections and persistent history-based favorites
 - on-disk local analysis cache, per-user snapshot cache, and shared static metadata cache for artists, albums, and tracks
+- SQLite schema migrations and `raw_play_event`, `ingest_run`, and `spotify_sync_state` tables
+- raw ingest helpers with source-row dedupe plus conservative cross-source upgrade matching
+- history JSON file loader and batch history ingest path
 
 ### High-level flow
 1. The user opens the React app and starts Spotify login.
@@ -62,6 +69,68 @@ This document is the implementation-oriented technical source of truth for the L
 5. The frontend first renders a loading handoff, then the dashboard snapshot, then optionally fills in the extended view.
 6. When Spotify is unavailable or the user explicitly chooses local mode, the backend returns a locally assembled payload backed by history and cached Spotify-derived metadata.
 7. A later milestone will add `POST /analysis` and `POST /playlist`.
+
+## Raw Ingest Architecture
+### Current raw tables
+- `ingest_run`
+  - records run lifecycle, row counts, inserted counts, duplicate counts, and error counts
+- `spotify_sync_state`
+  - stores the recent-sync watermark, overlap lookback, and current/latest sync run metadata
+- `raw_play_event`
+  - stores the raw play event plus ingest provenance and duration quality method
+
+### `raw_play_event` design
+Important fields currently include:
+- source identity
+  - `source_type`
+  - `source_event_id`
+  - `source_row_key`
+  - `cross_source_event_key`
+- play timing and duration
+  - `played_at`
+  - `ms_played`
+  - `ms_played_method`
+  - `track_duration_ms`
+- raw context
+  - `reason_start`
+  - `reason_end`
+  - `skipped`
+  - `platform`
+  - `shuffle`
+  - `offline`
+  - `conn_country`
+- Spotify metadata
+  - `spotify_track_uri`
+  - `spotify_track_id`
+  - `spotify_album_id`
+  - `spotify_artist_ids_json`
+  - `track_name_raw`
+  - `artist_name_raw`
+  - `album_name_raw`
+- payload retention
+  - `raw_payload_json`
+
+### Raw duration provenance
+`ms_played_method` currently allows:
+- `history_source`
+- `api_chronology`
+- `default_guess`
+
+Precedence:
+- `history_source > api_chronology > default_guess`
+
+Upgrade behavior:
+- exact `source_row_key` match first
+- if no exact source-row match, try `cross_source_event_key`
+- upgrade the existing row only when the incoming method outranks the stored method
+
+### Conservative cross-source key
+The current `cross_source_event_key` is built from:
+- canonical UTC `played_at`
+- `spotify_track_id` if available
+- otherwise `spotify_track_uri`
+
+This is intentionally conservative and avoids fuzzy title/artist matching for now.
 
 ## Recommended Project Layout
 This layout should be used when scaffolding the repository:
@@ -117,10 +186,10 @@ The FastAPI backend is responsible for:
 - creating playlists from selected artists
 
 ### Backend constraints
-- Do not add a database in MVP.
 - Keep services composable and testable in isolation.
 - Keep Spotify API access behind client or adapter interfaces.
 - Return stable response shapes even when some signals are unavailable.
+- Keep raw ingest semantics explicit: source-row idempotency first, cross-source upgrades second.
 
 ## Session and Persistence Model
 ### MVP choice
@@ -128,6 +197,7 @@ The FastAPI backend is responsible for:
 - Store Spotify access token, refresh token, expiry metadata, and minimal user identity in the session.
 - Assume a single backend instance for MVP and early cloud deployment.
 - Use local filesystem cache files only for dashboard caches, shared static metadata, local analysis payloads, and user snapshot fallbacks, not as a general-purpose user database.
+- Use the local SQLite database for raw play events and sync-state persistence.
 
 ### Implications
 - Sessions may be lost on server restart in local development.
@@ -166,6 +236,12 @@ The FastAPI backend is responsible for:
 ### Spotify client or adapters
 - Responsible only for calling Spotify endpoints, handling pagination, refreshing tokens, and normalizing low-level API errors.
 - Must not contain scoring or business rules.
+
+### Raw ingest services
+- Map source-specific payloads into the raw-play shape.
+- Preserve canonical UTC `played_at` formatting across sources.
+- Keep batch chronology inference in orchestration code, not one-item mappers.
+- Keep source-specific idempotency and cross-source upgrade rules in DB helpers.
 
 ### Aggregation pipeline
 - Converts liked tracks, saved albums, followed artists, and listening proxies into artist-level records.
@@ -239,6 +315,19 @@ Implemented data today:
 - optional `history_insights_available` flag when local exported history is being used to rank artists and albums
 - optional local-mode metadata such as cached-section status and last-sync timestamps
 - `mode=initial` for first-paint snapshot and `mode=extended` for larger background payloads
+
+### Raw ingest operations
+These are currently internal helpers, not stable public API endpoints.
+
+Implemented internal flows:
+- Spotify recent-play sync
+- Spotify history JSON file ingest
+
+Current internal guarantees:
+- recent-play sync replays an overlap window
+- known rows inside the overlap window are still processed so `default_guess -> api_chronology` upgrades can happen
+- older known rows beyond the overlap cutoff stop paging
+- history ingest uses the same raw upsert/upgrade rules as recent-play ingest
 
 ### `GET /me/progress`
 Purpose:
@@ -396,6 +485,7 @@ Fields:
 ### Optional or best-effort Spotify data
 - saved albums from `/me/albums` in later milestones
 - local extended streaming history export for calibration and richer artist/album ranking
+- local extended streaming history export for raw event ingestion and cross-source upgrades
 - best-effort album enrichment through lightweight Spotify album search when history-ranked albums need images and URLs
 - playback state and related controls when Spotify allows active player access
 
@@ -447,7 +537,6 @@ Requirement:
 
 ## Non-Goals for MVP
 - no recommendation engine based on similarity or genre
-- no persistent analytics database
 - no background jobs or scheduled sync
 - no multi-user admin features
 - no concert, album completion, or social features
@@ -456,6 +545,6 @@ Requirement:
 - Frontend framework: React
 - Backend framework: FastAPI
 - Auth provider: Spotify OAuth
-- Persistence: none beyond in-memory session storage
+- Persistence: in-memory session storage plus local SQLite/raw-cache persistence
 - Ranking logic owner: backend scoring service
 - Explanation owner: backend explanation service
