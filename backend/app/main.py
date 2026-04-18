@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import secrets
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -18,9 +19,20 @@ from fastapi.responses import RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
 
 from backend.app.config import get_settings
-from backend.app.db import apply_pending_migrations, ensure_sqlite_db
+from backend.app.db import apply_pending_migrations, ensure_sqlite_db, list_spotify_auth_users
 from backend.app.history_analysis import clear_history_insights_cache, get_history_signature, load_history_insights
 from backend.app.logging_config import configure_logging
+from backend.app.spotify_recent_api import fetch_spotify_recent_play_page
+from backend.app.spotify_current_playback import get_current_playback_for_user
+from backend.app.spotify_recent_polling import poll_recent_for_user
+from backend.app.spotify_recent_sync import sync_spotify_recent_plays
+from backend.app.spotify_token_store import (
+    SpotifyTokenStoreError,
+    get_spotify_tokens,
+    refresh_access_token_if_needed,
+    upsert_spotify_tokens,
+    validate_token_encryption_key,
+)
 
 settings = get_settings()
 logger = logging.getLogger("listenlabs.auth")
@@ -88,6 +100,7 @@ app.add_middleware(
 @app.on_event("startup")
 async def _ensure_sqlite_db_on_startup() -> None:
     log_file_path = configure_logging()
+    validate_token_encryption_key()
     ensure_sqlite_db()
     apply_pending_migrations()
     logger.info("event=backend_ready sqlite_initialized=true debug_log=%s", log_file_path)
@@ -96,90 +109,129 @@ async def _ensure_sqlite_db_on_startup() -> None:
 def _is_configured() -> bool:
     return bool(
         settings.spotify_client_id
-        and settings.spotify_client_secret
+        and settings.listenlab_token_encryption_key
         and settings.spotify_redirect_uri
         and settings.session_secret
     )
 
 
-def _require_token(request: Request) -> str:
-    token = request.session.get("access_token")
-    if not token:
+def _session_user_id(request: Request) -> str | None:
+    user_id = request.session.get("user_id")
+    if user_id:
+        return str(user_id)
+    spotify_user = request.session.get("spotify_user") or {}
+    if spotify_user.get("id"):
+        return str(spotify_user["id"])
+    return None
+
+
+def _require_user_id(request: Request) -> str:
+    user_id = _session_user_id(request)
+    if not user_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated with Spotify.",
         )
-    return token
+    return user_id
+
+
+def _restore_session_user_from_token_store(request: Request) -> str | None:
+    existing_user_id = _session_user_id(request)
+    if existing_user_id:
+        return existing_user_id
+
+    active_users = list_spotify_auth_users(active_only=True, limit=2)
+    if len(active_users) != 1:
+        return None
+
+    candidate_user_id = str(active_users[0].get("user_id") or "").strip()
+    if not candidate_user_id:
+        return None
+
+    try:
+        token_row = refresh_access_token_if_needed(candidate_user_id)
+    except SpotifyTokenStoreError:
+        return None
+
+    request.session["user_id"] = candidate_user_id
+    request.session["token_type"] = "Bearer"
+    expires_at = str(token_row.get("expires_at") or "")
+    if expires_at:
+        try:
+            remaining = int((_parse_iso_utc(expires_at) - datetime.now(UTC)).total_seconds())
+            request.session["expires_in"] = max(0, remaining)
+        except ValueError:
+            request.session["expires_in"] = None
+    request.session["spotify_user"] = {
+        "id": str(token_row.get("spotify_user_id") or candidate_user_id),
+        "display_name": None,
+        "email": None,
+    }
+    return candidate_user_id
+
+
+def _expires_at_from_expires_in(expires_in: int | str | None) -> str:
+    seconds = int(expires_in or 0)
+    if seconds <= 0:
+        seconds = 3600
+    return (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")
+
+
+def _parse_iso_utc(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+
+
+def _require_token(request: Request) -> str:
+    user_id = _require_user_id(request)
+    try:
+        token_row = refresh_access_token_if_needed(user_id)
+    except SpotifyTokenStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Spotify session expired. Please reconnect Spotify. ({exc})",
+        ) from exc
+
+    request.session["user_id"] = user_id
+    request.session["token_type"] = "Bearer"
+    expires_at = str(token_row.get("expires_at") or "")
+    if expires_at:
+        try:
+            remaining = int((_parse_iso_utc(expires_at) - datetime.now(UTC)).total_seconds())
+            request.session["expires_in"] = max(0, remaining)
+        except ValueError:
+            request.session["expires_in"] = None
+    return str(token_row["access_token"])
 
 
 async def _refresh_spotify_access_token(request: Request) -> str:
-    refresh_token = request.session.get("refresh_token")
-    if not refresh_token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Spotify session expired. Please reconnect Spotify.",
-        )
-
-    basic_auth = base64.b64encode(
-        f"{settings.spotify_client_id}:{settings.spotify_client_secret}".encode("utf-8")
-    ).decode("utf-8")
-
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        token_response = await client.post(
-            settings.spotify_token_url,
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token,
-            },
-            headers={
-                "Authorization": f"Basic {basic_auth}",
-                "Content-Type": "application/x-www-form-urlencoded",
-            },
-        )
-
-    if token_response.status_code >= 400:
-        detail = ""
-        try:
-            payload = token_response.json()
-            detail = payload.get("error_description") or payload.get("error") or ""
-        except ValueError:
-            detail = token_response.text[:160]
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Spotify session expired and could not be refreshed{f': {detail}' if detail else ''}. Please reconnect Spotify.",
-        )
-
-    token_data = token_response.json()
-    new_access_token = token_data.get("access_token")
-    if not new_access_token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Spotify session refresh did not return an access token. Please reconnect Spotify.",
-        )
-
-    request.session["access_token"] = new_access_token
-    request.session["token_type"] = token_data.get("token_type") or request.session.get("token_type")
-    request.session["expires_in"] = token_data.get("expires_in")
-    if token_data.get("refresh_token"):
-        request.session["refresh_token"] = token_data["refresh_token"]
-
-    return new_access_token
+    return _require_token(request)
 
 
-def _callback_redirect_url(reason: str, detail: str | None = None) -> str:
+def _callback_redirect_url(
+    reason: str,
+    detail: str | None = None,
+    extra: dict[str, str] | None = None,
+) -> str:
     query = {"status": reason}
     if detail:
         query["detail"] = detail
+    if extra:
+        query.update(extra)
     return f"{settings.frontend_url}/auth/callback?{urlencode(query)}"
+
+
+def _pkce_code_challenge(verifier: str) -> str:
+    digest = hashlib.sha256(verifier.encode("utf-8")).digest()
+    return base64.urlsafe_b64encode(digest).decode("utf-8").rstrip("=")
 
 
 def _progress_key(request: Request) -> str | None:
     user = request.session.get("spotify_user") or {}
     if user.get("id"):
         return str(user["id"])
-    token = request.session.get("access_token")
-    if token:
-        return f"token:{str(token)[:12]}"
+    user_id = _session_user_id(request)
+    if user_id:
+        return f"user:{user_id}"
     return None
 
 
@@ -3013,21 +3065,31 @@ async def health() -> dict[str, str]:
 
 
 @app.get("/auth/login")
-async def auth_login(request: Request) -> RedirectResponse:
+async def auth_login(
+    request: Request,
+    mode: str | None = None,
+) -> RedirectResponse:
     if not _is_configured():
         raise HTTPException(status_code=500, detail="Spotify OAuth is not configured.")
 
+    oauth_mode = "recent_ingest" if mode == "recent_ingest" else "default"
+    oauth_scope = "user-read-recently-played" if oauth_mode == "recent_ingest" else settings.spotify_scope
     state = secrets.token_urlsafe(32)
+    code_verifier = secrets.token_urlsafe(64)
+    code_challenge = _pkce_code_challenge(code_verifier)
     request.session["oauth_state"] = state
+    request.session["oauth_mode"] = oauth_mode
+    request.session["oauth_code_verifier"] = code_verifier
 
     query = urlencode(
         {
             "client_id": settings.spotify_client_id,
             "response_type": "code",
             "redirect_uri": settings.spotify_redirect_uri,
-            "scope": settings.spotify_scope,
+            "scope": oauth_scope,
             "state": state,
-            "show_dialog": "true",
+            "code_challenge_method": "S256",
+            "code_challenge": code_challenge,
         }
     )
 
@@ -3041,21 +3103,23 @@ async def auth_callback(request: Request, code: str | None = None, state: str | 
         logger.warning("Spotify callback state validation failed.")
         return RedirectResponse(url=_callback_redirect_url("state_error"), status_code=302)
 
-    credentials = f"{settings.spotify_client_id}:{settings.spotify_client_secret}".encode("utf-8")
-    basic_auth = base64.b64encode(credentials).decode("utf-8")
+    oauth_mode = str(request.session.get("oauth_mode") or "default")
+    code_verifier = request.session.get("oauth_code_verifier")
+
+    token_request_data: dict[str, str] = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "client_id": settings.spotify_client_id,
+        "redirect_uri": settings.spotify_redirect_uri,
+    }
+    if code_verifier:
+        token_request_data["code_verifier"] = str(code_verifier)
 
     async with httpx.AsyncClient(timeout=15.0) as client:
         token_response = await client.post(
             settings.spotify_token_url,
-            data={
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": settings.spotify_redirect_uri,
-            },
-            headers={
-                "Authorization": f"Basic {basic_auth}",
-                "Content-Type": "application/x-www-form-urlencoded",
-            },
+            data=token_request_data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
 
     if token_response.status_code >= 400:
@@ -3082,53 +3146,261 @@ async def auth_callback(request: Request, code: str | None = None, state: str | 
         logger.warning("Spotify token exchange succeeded without an access token.")
         return RedirectResponse(url=_callback_redirect_url("token_missing"), status_code=302)
 
-    request.session.pop("oauth_state", None)
-    request.session["access_token"] = access_token
-    request.session["refresh_token"] = token_data.get("refresh_token")
-    request.session["token_type"] = token_data.get("token_type")
-    request.session["expires_in"] = token_data.get("expires_in")
+    refresh_token = str(token_data.get("refresh_token") or "").strip()
+    if not refresh_token:
+        logger.warning("Spotify token exchange succeeded without a refresh token.")
+        return RedirectResponse(url=_callback_redirect_url("token_missing_refresh"), status_code=302)
+
+    expires_at = _expires_at_from_expires_in(token_data.get("expires_in"))
+    scopes = str(token_data.get("scope") or ("user-read-recently-played" if oauth_mode == "recent_ingest" else settings.spotify_scope))
 
     try:
         profile = await _fetch_spotify_profile(access_token)
     except HTTPException as exc:
         logger.warning("Spotify profile fetch failed after token exchange: %s", exc.detail)
-        request.session["spotify_user"] = {
-            "id": None,
-            "display_name": None,
-            "email": None,
+        return RedirectResponse(url=_callback_redirect_url("profile_error"), status_code=302)
+
+    spotify_user_id = str(profile.get("id") or "").strip()
+    if not spotify_user_id:
+        logger.warning("Spotify profile fetch after token exchange returned no user id.")
+        return RedirectResponse(url=_callback_redirect_url("profile_missing_id"), status_code=302)
+
+    try:
+        upsert_spotify_tokens(
+            user_id=spotify_user_id,
+            spotify_user_id=spotify_user_id,
+            access_token=str(access_token),
+            refresh_token=refresh_token,
+            expires_at=expires_at,
+            scopes=scopes,
+        )
+    except RuntimeError as exc:
+        logger.warning("Failed to persist Spotify tokens after OAuth callback: %s", exc)
+        return RedirectResponse(url=_callback_redirect_url("token_store_error"), status_code=302)
+
+    request.session.pop("oauth_state", None)
+    request.session.pop("oauth_mode", None)
+    request.session.pop("oauth_code_verifier", None)
+    request.session["user_id"] = spotify_user_id
+    request.session["token_type"] = token_data.get("token_type") or "Bearer"
+    request.session["expires_in"] = int(token_data.get("expires_in") or 0)
+    request.session["spotify_user"] = {
+        "id": spotify_user_id,
+        "display_name": profile.get("display_name"),
+        "email": profile.get("email"),
+    }
+
+    if oauth_mode == "recent_ingest":
+        ingest_result: dict[str, Any] = {
+            "flow": "recent_ingest",
+            "auth_succeeded": True,
+            "ingest_succeeded": False,
+            "error": None,
+            "row_count": 0,
+            "earliest_api_played_at": None,
+            "latest_api_played_at": None,
         }
-    else:
-        request.session["spotify_user"] = {
-            "id": profile.get("id"),
-            "display_name": profile.get("display_name"),
-            "email": profile.get("email"),
-        }
+        try:
+            summary = await sync_spotify_recent_plays(
+                access_token,
+                source_ref="oauth_recent_ingest",
+                limit=50,
+            )
+            ingest_result.update(
+                {
+                    "ingest_succeeded": True,
+                    "row_count": int(summary.get("row_count") or 0),
+                    "inserted_count": int(summary.get("inserted_count") or 0),
+                    "duplicate_count": int(summary.get("duplicate_count") or 0),
+                    "already_seen_source_row_count": int(summary.get("already_seen_source_row_count") or 0),
+                    "merged_duplicate_row_count": int(summary.get("merged_duplicate_row_count") or 0),
+                    "earliest_api_played_at": summary.get("earliest_played_at"),
+                    "latest_api_played_at": summary.get("latest_played_at"),
+                }
+            )
+        except Exception as exc:
+            ingest_result["error"] = str(exc)
+
+        request.session["recent_ingest_result"] = ingest_result
+        return RedirectResponse(
+            url=_callback_redirect_url("success", extra={"flow": "recent_ingest"}),
+            status_code=302,
+        )
 
     return RedirectResponse(url=_callback_redirect_url("success"), status_code=302)
 
 
+@app.get("/auth/recent-ingest/result")
+async def auth_recent_ingest_result(request: Request) -> dict[str, Any]:
+    payload = request.session.pop("recent_ingest_result", None)
+    if not isinstance(payload, dict):
+        return {"has_result": False}
+    return {"has_result": True, **payload}
+
+
+@app.get("/auth/recent-ingest/probe-before")
+async def auth_recent_ingest_probe_before(
+    request: Request,
+    days: int = 90,
+    limit: int = 50,
+) -> dict[str, Any]:
+    bounded_days = max(1, min(days, 365))
+    bounded_limit = max(1, min(limit, 50))
+    before_iso = (datetime.now(UTC) - timedelta(days=bounded_days)).isoformat().replace("+00:00", "Z")
+    before_millis = int(datetime.fromisoformat(before_iso.replace("Z", "+00:00")).timestamp() * 1000)
+
+    token_source = "token_store"
+    token = _require_token(request)
+
+    try:
+        page = await fetch_spotify_recent_play_page(
+            str(token),
+            before_cursor=str(before_millis),
+            limit=bounded_limit,
+        )
+    except RuntimeError as exc:
+        detail = str(exc)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+    items = page.get("items") or []
+    played_values = sorted(
+        str(item.get("played_at"))
+        for item in items
+        if isinstance(item, dict) and item.get("played_at") is not None
+    )
+
+    return {
+        "ok": True,
+        "token_source": token_source,
+        "days": bounded_days,
+        "limit": bounded_limit,
+        "before_iso": before_iso,
+        "before_millis": before_millis,
+        "returned_items": len(items),
+        "earliest_played_at": played_values[0] if played_values else None,
+        "latest_played_at": played_values[-1] if played_values else None,
+    }
+
+
+@app.get("/auth/recent-ingest/probe-backfill")
+async def auth_recent_ingest_probe_backfill(
+    request: Request,
+    limit: int = 50,
+    max_pages: int = 10,
+) -> dict[str, Any]:
+    bounded_limit = max(1, min(limit, 50))
+    bounded_pages = max(1, min(max_pages, 50))
+
+    token_source = "token_store"
+    token = _require_token(request)
+
+    before_cursor: str | None = None
+    page_summaries: list[dict[str, Any]] = []
+    all_played_at: list[str] = []
+    total_items = 0
+
+    for page_index in range(1, bounded_pages + 1):
+        try:
+            page = await fetch_spotify_recent_play_page(
+                str(token),
+                before_cursor=before_cursor,
+                limit=bounded_limit,
+            )
+        except RuntimeError as exc:
+            detail = str(exc)
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+        items = page.get("items") or []
+        item_count = len(items)
+        total_items += item_count
+        played_values = sorted(
+            str(item.get("played_at"))
+            for item in items
+            if isinstance(item, dict) and item.get("played_at") is not None
+        )
+        all_played_at.extend(played_values)
+        page_summaries.append(
+            {
+                "page": page_index,
+                "item_count": item_count,
+                "earliest_played_at": played_values[0] if played_values else None,
+                "latest_played_at": played_values[-1] if played_values else None,
+            }
+        )
+
+        next_before = page.get("before_cursor")
+        if item_count == 0 or next_before is None:
+            break
+        before_cursor = str(next_before)
+
+    all_played_at.sort()
+    return {
+        "ok": True,
+        "token_source": token_source,
+        "limit": bounded_limit,
+        "max_pages": bounded_pages,
+        "pages_fetched": len(page_summaries),
+        "total_items": total_items,
+        "earliest_played_at": all_played_at[0] if all_played_at else None,
+        "latest_played_at": all_played_at[-1] if all_played_at else None,
+        "page_summaries": page_summaries,
+    }
+
+
 @app.get("/auth/session")
 async def auth_session(request: Request) -> dict[str, Any]:
+    user_id = _session_user_id(request) or _restore_session_user_from_token_store(request)
     user = request.session.get("spotify_user") or {}
-    authenticated = bool(request.session.get("access_token"))
+    token_state = get_spotify_tokens(user_id) if user_id else None
+    authenticated = bool(token_state and not token_state.get("reauth_required"))
 
     return {
         "authenticated": authenticated,
         "display_name": user.get("display_name"),
-        "spotify_user_id": user.get("id"),
+        "spotify_user_id": user.get("id") or (str(token_state.get("spotify_user_id")) if token_state else None),
         "email": user.get("email"),
     }
 
 
+@app.get("/auth/current-playback")
+async def auth_current_playback(request: Request) -> dict[str, Any]:
+    user_id = _require_user_id(request)
+    return await get_current_playback_for_user(user_id)
+
+
+@app.post("/auth/recent-ingest/poll-now")
+async def auth_recent_ingest_poll_now(request: Request) -> dict[str, Any]:
+    user_id = _require_user_id(request)
+    return await poll_recent_for_user(user_id)
+
+
 @app.get("/auth/full-availability")
 async def auth_full_availability(request: Request) -> dict[str, Any]:
-    token = request.session.get("access_token")
-    if not token:
+    user_id = _session_user_id(request)
+    if not user_id:
         return {
             "available": False,
             "blocked": False,
             "reason": "not_authenticated",
             "detail": "Spotify is not connected for this session.",
+            "retry_after_seconds": None,
+        }
+
+    token_state = get_spotify_tokens(user_id)
+    if token_state is None:
+        return {
+            "available": False,
+            "blocked": False,
+            "reason": "not_authenticated",
+            "detail": "Spotify is not connected for this session.",
+            "retry_after_seconds": None,
+        }
+    if token_state.get("reauth_required"):
+        return {
+            "available": False,
+            "blocked": False,
+            "reason": "reauth_required",
+            "detail": str(token_state.get("reauth_reason") or "Spotify reauthorization is required."),
             "retry_after_seconds": None,
         }
 
@@ -3143,6 +3415,7 @@ async def auth_full_availability(request: Request) -> dict[str, Any]:
         }
 
     try:
+        token = _require_token(request)
         await _fetch_spotify_profile(token)
     except HTTPException as exc:
         if exc.status_code == status.HTTP_401_UNAUTHORIZED:
@@ -3211,9 +3484,7 @@ async def auth_full_availability(request: Request) -> dict[str, Any]:
 
 @app.get("/auth/token")
 async def auth_token(request: Request) -> dict[str, Any]:
-    token = request.session.get("access_token")
-    if not token:
-        raise HTTPException(status_code=401, detail="Not authenticated with Spotify.")
+    _require_user_id(request)
 
     # Return a freshly refreshed token for playback/API clients so we don't hand
     # out an expired session token.
@@ -3237,9 +3508,7 @@ async def preview_representative(
     kind: str,
     spotify_id: str,
 ) -> dict[str, Any]:
-    token = request.session.get("access_token")
-    if not token:
-        raise HTTPException(status_code=401, detail="Not authenticated with Spotify.")
+    token = _require_token(request)
 
     market: str | None = None
     try:

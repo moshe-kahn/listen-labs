@@ -82,6 +82,7 @@ def ingest_history_dump_rows(
     *,
     rows: list[dict[str, Any]],
     source_ref: str | None = None,
+    continue_on_error: bool = False,
 ) -> dict[str, Any]:
     total_started = perf_counter()
     run_id = str(uuid4())
@@ -97,6 +98,9 @@ def ingest_history_dump_rows(
     row_count = 0
     inserted_count = 0
     duplicate_count = 0
+    already_seen_source_row_count = 0
+    merged_duplicate_row_count = 0
+    failure_count = 0
     mapping_elapsed_ms = 0.0
     db_ingest_elapsed_ms = 0.0
 
@@ -112,53 +116,69 @@ def ingest_history_dump_rows(
 
             for raw_row in rows:
                 row_count += 1
-                mapping_started = perf_counter()
-                mapped = map_history_dump_row(raw_row)
-                mapping_elapsed_ms += (perf_counter() - mapping_started) * 1000
+                try:
+                    mapping_started = perf_counter()
+                    mapped = map_history_dump_row(raw_row)
+                    mapping_elapsed_ms += (perf_counter() - mapping_started) * 1000
 
-                db_started = perf_counter()
-                result = _insert_or_upgrade_raw_play_event_with_connection(
-                    connection,
-                    source_type="export",
-                    source_row_key=str(mapped["source_row_key"]),
-                    cross_source_event_key=mapped.get("cross_source_event_key"),
-                    played_at=str(mapped["played_at"]),
-                    ms_played=int(mapped["ms_played"]),
-                    ms_played_method=str(mapped["ms_played_method"]),
-                    track_duration_ms=mapped.get("track_duration_ms"),
-                    reason_start=mapped.get("reason_start"),
-                    reason_end=mapped.get("reason_end"),
-                    raw_payload_json=str(mapped["raw_payload_json"]),
-                    ingest_run_id=run_id,
-                    skipped=mapped.get("skipped"),
-                    platform=mapped.get("platform"),
-                    shuffle=mapped.get("shuffle"),
-                    offline=mapped.get("offline"),
-                    conn_country=mapped.get("conn_country"),
-                    spotify_track_uri=mapped.get("spotify_track_uri"),
-                    spotify_track_id=mapped.get("spotify_track_id"),
-                    track_name_raw=mapped.get("track_name_raw"),
-                    artist_name_raw=mapped.get("artist_name_raw"),
-                    album_name_raw=mapped.get("album_name_raw"),
-                    spotify_album_id=mapped.get("spotify_album_id"),
-                    spotify_artist_ids_json=mapped.get("spotify_artist_ids_json"),
-                )
-                db_ingest_elapsed_ms += (perf_counter() - db_started) * 1000
+                    db_started = perf_counter()
+                    result = _insert_or_upgrade_raw_play_event_with_connection(
+                        connection,
+                        source_type="export",
+                        source_row_key=str(mapped["source_row_key"]),
+                        cross_source_event_key=mapped.get("cross_source_event_key"),
+                        played_at=str(mapped["played_at"]),
+                        ms_played=int(mapped["ms_played"]),
+                        ms_played_method=str(mapped["ms_played_method"]),
+                        track_duration_ms=mapped.get("track_duration_ms"),
+                        reason_start=mapped.get("reason_start"),
+                        reason_end=mapped.get("reason_end"),
+                        raw_payload_json=str(mapped["raw_payload_json"]),
+                        ingest_run_id=run_id,
+                        skipped=mapped.get("skipped"),
+                        platform=mapped.get("platform"),
+                        shuffle=mapped.get("shuffle"),
+                        offline=mapped.get("offline"),
+                        conn_country=mapped.get("conn_country"),
+                        spotify_track_uri=mapped.get("spotify_track_uri"),
+                        spotify_track_id=mapped.get("spotify_track_id"),
+                        track_name_raw=mapped.get("track_name_raw"),
+                        artist_name_raw=mapped.get("artist_name_raw"),
+                        album_name_raw=mapped.get("album_name_raw"),
+                        spotify_album_id=mapped.get("spotify_album_id"),
+                        spotify_artist_ids_json=mapped.get("spotify_artist_ids_json"),
+                    )
+                    db_ingest_elapsed_ms += (perf_counter() - db_started) * 1000
 
-                action = str(result["action"])
-                if action == "unchanged":
-                    duplicate_count += 1
-                else:
-                    inserted_count += 1
+                    action = str(result["action"])
+                    match_type = str(result.get("match_type") or "")
+                    if action == "unchanged":
+                        duplicate_count += 1
+                        if match_type == "source_row_key":
+                            already_seen_source_row_count += 1
+                    elif action == "merged_duplicate_row":
+                        merged_duplicate_row_count += 1
+                    else:
+                        inserted_count += 1
 
-                file_logger.debug(
-                    "event=history_dump_row_result run_id=%s row_number=%s source_row_key=%s result=%s raw_play_event_id=%s",
-                    run_id,
-                    row_count,
-                    mapped["source_row_key"],
-                    action,
-                    result["row_id"],
-                )
+                    file_logger.debug(
+                        "event=history_dump_row_result run_id=%s row_number=%s source_row_key=%s match_type=%s result=%s raw_play_event_id=%s",
+                        run_id,
+                        row_count,
+                        mapped["source_row_key"],
+                        match_type,
+                        action,
+                        result["row_id"],
+                    )
+                except Exception:
+                    failure_count += 1
+                    if not continue_on_error:
+                        raise
+                    file_logger.exception(
+                        "event=history_dump_row_failed run_id=%s row_number=%s",
+                        run_id,
+                        row_count,
+                    )
 
             completed_at = _utc_now_iso()
             _complete_ingest_run_with_connection(
@@ -168,7 +188,7 @@ def ingest_history_dump_rows(
                 row_count=row_count,
                 inserted_count=inserted_count,
                 duplicate_count=duplicate_count,
-                error_count=0,
+                error_count=failure_count,
                 status="completed",
             )
         logger.info(
@@ -178,11 +198,14 @@ def ingest_history_dump_rows(
             duplicate_count,
         )
         file_logger.debug(
-            "event=history_dump_ingest_completed run_id=%s row_count=%s inserted_count=%s duplicate_count=%s mapping_ms=%.2f db_ingest_ms=%.2f total_ms=%.2f",
+            "event=history_dump_ingest_completed run_id=%s row_count=%s inserted_count=%s duplicate_count=%s already_seen_source_row_count=%s merged_duplicate_row_count=%s failure_count=%s mapping_ms=%.2f db_ingest_ms=%.2f total_ms=%.2f",
             run_id,
             row_count,
             inserted_count,
             duplicate_count,
+            already_seen_source_row_count,
+            merged_duplicate_row_count,
+            failure_count,
             mapping_elapsed_ms,
             db_ingest_elapsed_ms,
             (perf_counter() - total_started) * 1000,
@@ -190,11 +213,12 @@ def ingest_history_dump_rows(
     except Exception:
         logger.info("Spotify history ingest failed")
         file_logger.exception(
-            "event=history_dump_ingest_failed run_id=%s row_count=%s inserted_count=%s duplicate_count=%s mapping_ms=%.2f db_ingest_ms=%.2f total_ms=%.2f source_ref=%s",
+            "event=history_dump_ingest_failed run_id=%s row_count=%s inserted_count=%s duplicate_count=%s failure_count=%s mapping_ms=%.2f db_ingest_ms=%.2f total_ms=%.2f source_ref=%s",
             run_id,
             row_count,
             inserted_count,
             duplicate_count,
+            failure_count,
             mapping_elapsed_ms,
             db_ingest_elapsed_ms,
             (perf_counter() - total_started) * 1000,
@@ -202,6 +226,7 @@ def ingest_history_dump_rows(
         )
         raise
 
+    run_duration_ms = (perf_counter() - total_started) * 1000
     return {
         "run_id": run_id,
         "started_at": started_at,
@@ -209,6 +234,10 @@ def ingest_history_dump_rows(
         "row_count": row_count,
         "inserted_count": inserted_count,
         "duplicate_count": duplicate_count,
+        "already_seen_source_row_count": already_seen_source_row_count,
+        "merged_duplicate_row_count": merged_duplicate_row_count,
+        "failure_count": failure_count,
+        "run_duration_ms": run_duration_ms,
     }
 
 
@@ -227,12 +256,14 @@ def ingest_history_dump_files(
     *,
     history_dir: str | Path | None = None,
     source_ref: str | None = None,
+    continue_on_error: bool = False,
 ) -> dict[str, Any]:
     total_started = perf_counter()
     rows, file_paths = load_history_dump_rows_from_files(history_dir=history_dir)
     ingest_summary = ingest_history_dump_rows(
         rows=rows,
         source_ref=source_ref or "spotify_history_files",
+        continue_on_error=continue_on_error,
     )
     total_elapsed_ms = (perf_counter() - total_started) * 1000
     logger.info("Spotify history file import completed: %s files", len(file_paths))
@@ -254,8 +285,10 @@ def manual_ingest_history_dump_files(
     *,
     history_dir: str | Path | None = None,
     source_ref: str | None = None,
+    continue_on_error: bool = False,
 ) -> dict[str, Any]:
     return ingest_history_dump_files(
         history_dir=history_dir,
         source_ref=source_ref or "manual_history_dump_files",
+        continue_on_error=continue_on_error,
     )

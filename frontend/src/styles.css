@@ -871,6 +871,11 @@ h1 {
   cursor: not-allowed;
 }
 
+.primary-button.primary-button-readonly {
+  opacity: 0.5;
+  filter: saturate(0.35);
+}
+
 .info-card,
 .profile-card,
 .stat-card {
@@ -909,6 +914,32 @@ h1 {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+}
+
+.section-column-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tracks-page-link-button {
+  white-space: nowrap;
+}
+
+.tracks-only-card {
+  padding-top: 16px;
+}
+
+.tracks-only-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.tracks-only-back-button {
+  white-space: nowrap;
 }
 
 .recent-range-toggle {
@@ -1233,6 +1264,24 @@ h1 {
 .player-menu-copy-top h2 {
   margin: 0;
   min-width: 0;
+}
+
+.player-menu-title-button {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.player-menu-title-button:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .player-menu-line {
@@ -2018,6 +2067,17 @@ h1 {
   }
 
   .profile-identity {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .section-column-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .section-column-header-actions {
+    width: 100%;
     align-items: flex-start;
     flex-direction: column;
   }

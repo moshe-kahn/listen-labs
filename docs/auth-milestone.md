@@ -6,11 +6,16 @@
 - frontend loading screen after successful Spotify auth
 - sticky dashboard navigation with section jump controls
 - local/full/test mode controls for Spotify availability and rate-limit fallback
+- dedicated recent-ingest login/probe controls for recently-played debugging
+- tracks-only comparison page for current vs new all-time ranking formulas
 - playback controls and player-state UI
 - FastAPI backend with Spotify OAuth endpoints
 - backend token exchange and session storage
+- encrypted Spotify token persistence plus token-backed session restore
+- PKCE-backed Spotify auth support for the recent-ingest flow
 - authenticated `GET /me` snapshot endpoint
 - authenticated `GET /me/progress` timing endpoint for load debugging
+- authenticated recent-ingest result, probe, and poll-now endpoints
 - `POST /cache/rebuild` endpoint used by reconnect to force a cold rebuild
 - dashboard sections for playlists, recent activity, top tracks, top artists, and top albums
 - optional local history calibration for artist and album rankings
@@ -52,6 +57,8 @@ npm install --prefix frontend
 npm run dev --prefix frontend
 ```
 
+The Vite dev server now proxies `/api` to `http://127.0.0.1:8000`, so local frontend code can use relative API paths without separate CORS-specific configuration.
+
 ## Spotify app settings
 Set the Spotify redirect URI to:
 
@@ -68,6 +75,8 @@ http://127.0.0.1:8000/auth/callback
 6. Confirm playlists, recent activity, and top sections appear without repeated auth errors.
 7. If local history calibration is configured, confirm top artists and albums reflect exported listening history.
 8. If reconnect is used, confirm the dashboard rebuilds from a cleared cache.
+9. If using the recent-ingest button, confirm the callback returns an ingest result summary instead of only restoring the session.
+10. If using probe or poll-now actions, confirm the summaries render without breaking the signed-in dashboard shell.
 
 ## Optional local history calibration
 If you have a Spotify extended streaming history export locally, set:
@@ -87,8 +96,9 @@ This is optional and intended for local calibration and richer artist/album rank
 - `spotify_static_metadata.json` stores shared static artist, album, and track metadata for reuse across users.
 - `dashboard-progress.log` records load timing phases for debugging local performance.
 - These files are runtime artifacts and should not be committed.
+- Validation outputs under `backend/data/validation/` and SQLite copy files in `backend/data/` are also local-only artifacts and should not be committed.
 
 ## Known next step
 - turn the current snapshot dashboard into the final overlooked-artist analysis experience with explanation-first ranking
 - fix outstanding album-ranking and local-image hydration bugs uncovered during the dashboard expansion work
-- continue improving raw ingest performance and use the resulting SQLite data as the base for later scoring work
+- continue improving raw ingest performance and use the resulting SQLite data, validation scripts, and track-comparison views as the base for later scoring work

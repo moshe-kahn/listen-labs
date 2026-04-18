@@ -9,12 +9,16 @@ This document is the implementation-oriented technical source of truth for the L
 - Spotify OAuth login, callback handling, session persistence, and authenticated `GET /me` profile loading are implemented.
 - The dashboard currently renders profile identity, playlists, recent listening, liked tracks, top tracks, top artists, and top albums.
 - The dashboard also includes playback controls plus a local/full/test mode model for working through Spotify rate limits and local-only sessions.
+- The auth layer now also supports a dedicated recent-ingest OAuth path with PKCE plus probe and poll-now endpoints for recent-play API debugging.
 - A local exported-history analyzer can calibrate artist and album rankings from Spotify extended streaming history when a history directory is configured.
 - The dashboard uses a dedicated post-login loading screen, then swaps into a sticky-navigation dashboard shell.
+- The frontend now includes a tracks-only comparison page for evaluating current vs new all-time track ranking formulas.
 - Backend section-level caching is implemented for moderate-freshness live sections, long-lived history-derived favorites, shared static Spotify metadata, and saved user snapshot sections for local mode.
-- A local SQLite database now stores raw play events, ingest runs, and Spotify recent-sync state.
+- A local SQLite database now stores raw play events, live playback observations, ingest runs, and Spotify recent-sync state.
+- Encrypted Spotify token persistence now supports token-backed session restore for returning users.
 - Spotify recent-play API ingest is implemented with replay overlap handling, conservative early-stop paging, and batch chronology-based `ms_played` upgrades.
 - Spotify extended history JSON ingest is implemented into the same raw-play table, with cross-source upgrade support from API-estimated rows to source-truth rows.
+- Raw duplicate-member tracking, ingest-run cleanup helpers, current-playback observation, and unified top-track SQLite queries are now implemented on top of the ingest foundation.
 - The core overlooked-artist analysis flow and playlist creation flow are still not implemented.
 
 ### Target MVP state
@@ -48,18 +52,25 @@ This document is the implementation-oriented technical source of truth for the L
 - frontend persistent sticky navigation with project/account popovers
 - frontend playback controls and player state presentation
 - frontend local/full/test mode controls with cached-state indicators
+- frontend tracks-only comparison page for current vs new all-time ranking formulas
+- frontend recent-ingest controls for connect+ingest, before-cursor probe, backfill probe, and post-track-end polling
 - backend OAuth endpoints
 - backend token exchange and session storage
+- backend encrypted Spotify token persistence and token-backed session restore
+- backend PKCE code-challenge handling for Spotify auth flows
 - authenticated `GET /me` snapshot endpoint
 - authenticated `GET /me/progress` timing endpoint for debugging load phases
+- authenticated recent-ingest result, probe, and poll-now endpoints
 - authenticated `POST /cache/rebuild` endpoint for clearing dashboard caches before reconnect
 - best-effort live Spotify data fetches for profile, playlists, recent listening, liked tracks, top tracks, top artists, and top albums
 - optional local history-based artist and album ranking calibration
 - section-level caching for live sections and persistent history-based favorites
 - on-disk local analysis cache, per-user snapshot cache, and shared static metadata cache for artists, albums, and tracks
-- SQLite schema migrations and `raw_play_event`, `ingest_run`, and `spotify_sync_state` tables
+- SQLite schema migrations and `raw_play_event`, `raw_play_event_membership`, `live_playback_event`, `ingest_run`, and `spotify_sync_state` tables
 - raw ingest helpers with source-row dedupe plus conservative cross-source upgrade matching
+- ingest-run listing, fetch, and deletion helpers plus a unified top-track query on raw data
 - history JSON file loader and batch history ingest path
+- backend scripts for data-foundation validation, ingest-run hygiene smoke checks, current-playback polling, and recent-play probing
 
 ### High-level flow
 1. The user opens the React app and starts Spotify login.
@@ -78,6 +89,10 @@ This document is the implementation-oriented technical source of truth for the L
   - stores the recent-sync watermark, overlap lookback, and current/latest sync run metadata
 - `raw_play_event`
   - stores the raw play event plus ingest provenance and duration quality method
+- `raw_play_event_membership`
+  - stores every seen `source_row_key` that maps to a canonical `raw_play_event`
+- `live_playback_event`
+  - stores observational current-playback snapshots separately from durable canonical play history
 
 ### `raw_play_event` design
 Important fields currently include:
@@ -90,6 +105,8 @@ Important fields currently include:
   - `played_at`
   - `ms_played`
   - `ms_played_method`
+  - `duplicate_row_count`
+  - `duplicate_merge_strategy`
   - `track_duration_ms`
 - raw context
   - `reason_start`
@@ -120,9 +137,10 @@ Precedence:
 - `history_source > api_chronology > default_guess`
 
 Upgrade behavior:
-- exact `source_row_key` match first
+- exact `source_row_key` membership match first
 - if no exact source-row match, try `cross_source_event_key`
 - upgrade the existing row only when the incoming method outranks the stored method
+- when the same logical play is seen from another source, attach a membership row and keep one canonical raw event
 
 ### Conservative cross-source key
 The current `cross_source_event_key` is built from:
@@ -231,6 +249,7 @@ The FastAPI backend is responsible for:
 - Persistent history cache is invalidated when the Spotify exported-history file signature changes or when `POST /cache/rebuild` is called.
 - Shared static metadata is schema-versioned, fail-safe on corrupt JSON, and bounded per bucket with deterministic trim rules.
 - Generated cache files under `backend/data/cache/` are runtime artifacts and should not be committed.
+- Validation databases under `backend/data/validation/` and SQLite copy files under `backend/data/` are also local-only runtime artifacts.
 
 ## Internal Service Boundaries
 ### Spotify client or adapters
@@ -275,6 +294,8 @@ Purpose:
 
 Behavior:
 - Generate OAuth state.
+- Generate PKCE verifier/challenge material.
+- Accept an optional recent-ingest mode with a narrower scope.
 - Redirect the browser to Spotify authorization.
 
 ### `GET /auth/callback`
@@ -285,7 +306,24 @@ Behavior:
 - Validate OAuth state.
 - Exchange the authorization code for tokens.
 - Create or update the server-side session.
+- In recent-ingest mode, run a recent-play sync immediately and stash the result in session for the frontend.
 - Redirect back to the frontend app.
+
+### `GET /auth/recent-ingest/result`
+Purpose:
+- Return the one-shot result of the recent-ingest auth flow.
+
+### `GET /auth/recent-ingest/probe-before`
+Purpose:
+- Probe Spotify recently-played with a bounded `before` cursor for API-behavior debugging.
+
+### `GET /auth/recent-ingest/probe-backfill`
+Purpose:
+- Walk multiple recently-played pages and summarize cursor behavior during backfill debugging.
+
+### `POST /auth/recent-ingest/poll-now`
+Purpose:
+- Trigger a one-shot recent-play poll after live playback UI detection suggests a track just ended.
 
 ### `GET /auth/session`
 Purpose:

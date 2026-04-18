@@ -168,9 +168,13 @@ type RecentSectionResponse = {
   recent_likes_available: boolean;
 };
 
-const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
+const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "/api";
 const githubRepoUrl = "https://github.com/moshe-kahn/listen-labs";
 const EXPERIENCE_MODE_STORAGE_KEY = "listenlab-experience-mode";
+const LIVE_PLAYBACK_POLL_INTERVAL_MS = 10_000;
+const LIVE_PLAYBACK_PROGRESS_TICK_MS = 500;
+const LIVE_CONTROL_DOUBLE_TAP_WINDOW_MS = 900;
+const LIVE_TRACK_END_RECENT_POLL_DELAY_MS = 3_500;
 const PAGE_SIZE = 5;
 const RECENT_SECTION_FETCH_LIMIT = 10;
 const PLAYLISTS_PAGE_SIZE = 10;
@@ -183,6 +187,7 @@ type AnalysisMode = "quick" | "full";
 type ExperienceMode = "full" | "local";
 type ExperienceVisualMode = ExperienceMode | "test";
 type TrackRankingMode = "plays" | "mix" | "longevity";
+type AppPage = "dashboard" | "tracksOnly";
 const spotifyLogoDataUrl =
   "data:image/svg+xml;utf8," +
   encodeURIComponent(
@@ -201,6 +206,8 @@ type SectionKey =
   | "artistsRecent"
   | "tracks"
   | "tracksAllTime"
+  | "tracksAllTimeNew"
+  | "tracksAllTimeCurrent"
   | "tracksRecent"
   | "albums"
   | "albumsAllTime"
@@ -218,6 +225,8 @@ const INITIAL_OPEN_SECTIONS: Record<SectionKey, boolean> = {
   tracks: false,
   tracksAllTime: false,
   tracksRecent: false,
+  tracksAllTimeNew: false,
+  tracksAllTimeCurrent: false,
   albums: false,
   albumsAllTime: false,
   albumsRecent: false,
@@ -234,6 +243,8 @@ const INITIAL_SECTION_PAGES: Record<SectionKey, number> = {
   artistsRecent: 0,
   tracks: 0,
   tracksAllTime: 0,
+  tracksAllTimeNew: 0,
+  tracksAllTimeCurrent: 0,
   tracksRecent: 0,
   albums: 0,
   albumsAllTime: 0,
@@ -288,12 +299,70 @@ type AuthTokenResponse = {
   expires_in?: number | null;
 };
 
+type RecentIngestResultResponse = {
+  has_result: boolean;
+  flow?: string;
+  auth_succeeded?: boolean;
+  ingest_succeeded?: boolean;
+  error?: string | null;
+  row_count?: number;
+  earliest_api_played_at?: string | null;
+  latest_api_played_at?: string | null;
+};
+
+type RecentBeforeProbeResponse = {
+  ok: boolean;
+  token_source?: string;
+  days?: number;
+  limit?: number;
+  before_iso?: string;
+  returned_items?: number;
+  earliest_played_at?: string | null;
+  latest_played_at?: string | null;
+  detail?: string;
+};
+
+type RecentBackfillProbeResponse = {
+  ok: boolean;
+  token_source?: string;
+  limit?: number;
+  max_pages?: number;
+  pages_fetched?: number;
+  total_items?: number;
+  earliest_played_at?: string | null;
+  latest_played_at?: string | null;
+  detail?: string;
+};
+
 type FullAvailabilityResponse = {
   available: boolean;
   blocked: boolean;
   reason: string;
   detail?: string | null;
   retry_after_seconds?: number | null;
+};
+
+type CurrentPlaybackSnapshot = {
+  item_type: string | null;
+  item_id: string | null;
+  name: string | null;
+  uri: string | null;
+  image_url: string | null;
+  artist_names: string[];
+  album_name: string | null;
+  device_id: string | null;
+  progress_ms: number | null;
+  duration_ms: number | null;
+  is_playing: boolean;
+  device_name: string | null;
+  device_type: string | null;
+  timestamp: number | null;
+};
+
+type CurrentPlaybackResponse = {
+  status: "ok" | "failed" | "skipped";
+  has_playback?: boolean;
+  snapshot?: CurrentPlaybackSnapshot | null;
 };
 
 type PlayerTrackSummary = {
@@ -356,6 +425,10 @@ export function App() {
   const [profile, setProfile] = useState<ProfileResponse | null>(null);
   const [statusMessage, setStatusMessage] = useState("Checking authentication state...");
   const [statusHistory, setStatusHistory] = useState<string[]>([]);
+  const [recentIngestCallbackPending, setRecentIngestCallbackPending] = useState(false);
+  const [recentIngestResult, setRecentIngestResult] = useState<RecentIngestResultResponse | null>(null);
+  const [recentBeforeProbeResult, setRecentBeforeProbeResult] = useState<RecentBeforeProbeResponse | null>(null);
+  const [recentBackfillProbeResult, setRecentBackfillProbeResult] = useState<RecentBackfillProbeResponse | null>(null);
   const [authTransitioning, setAuthTransitioning] = useState(false);
   const [loadingProfile, setLoadingProfile] = useState(false);
   const [loadingExtendedProfile, setLoadingExtendedProfile] = useState(false);
@@ -385,10 +458,16 @@ export function App() {
   const [playbackPaused, setPlaybackPaused] = useState(true);
   const [playbackPositionMs, setPlaybackPositionMs] = useState(0);
   const [playbackDurationMs, setPlaybackDurationMs] = useState(0);
+  const [livePlaybackSnapshot, setLivePlaybackSnapshot] = useState<CurrentPlaybackSnapshot | null>(null);
+  const [liveDerivedProgressMs, setLiveDerivedProgressMs] = useState(0);
+  const [liveAwaitingNextTrack, setLiveAwaitingNextTrack] = useState(false);
+  const [livePlaybackProbeComplete, setLivePlaybackProbeComplete] = useState(false);
   const [pendingSeekMs, setPendingSeekMs] = useState<number | null>(null);
+  const [liveControlOverrideUntilMs, setLiveControlOverrideUntilMs] = useState<number | null>(null);
   const [recentRange, setRecentRange] = useState<RecentRange>("short_term");
   const [trackRankingMode, setTrackRankingMode] = useState<TrackRankingMode>("plays");
   const [trackRankingRefreshPending, setTrackRankingRefreshPending] = useState(false);
+  const [appPage, setAppPage] = useState<AppPage>("dashboard");
   const [recentRangeRefreshPending, setRecentRangeRefreshPending] = useState(false);
   const [analysisMode, setAnalysisMode] = useState<AnalysisMode>("quick");
   const [experienceMode, setExperienceMode] = useState<ExperienceMode>(() => {
@@ -404,10 +483,55 @@ export function App() {
   const rateLimitMenuRef = useRef<HTMLDivElement | null>(null);
   const spotifyPlayerRef = useRef<SpotifyPlayerInstance | null>(null);
   const spotifyDeviceIdRef = useRef<string | null>(null);
+  const liveProgressAnchorRef = useRef<{ baseProgressMs: number; receivedAtMs: number; durationMs: number } | null>(null);
+  const liveEndRefreshRequestedRef = useRef(false);
+  const liveControlTapMsRef = useRef(0);
   const profileLoadInFlightRef = useRef(false);
   const extendedLoadInFlightRef = useRef(false);
   const quickRecentAutoAttemptRef = useRef<string | null>(null);
   const hasPremiumPlayback = profile?.product?.toLowerCase() === "premium";
+  const usingLivePlaybackSnapshot = Boolean(livePlaybackSnapshot);
+  const liveControlOverrideActive = Boolean(
+    liveControlOverrideUntilMs != null
+    && liveControlOverrideUntilMs > Date.now()
+    && playerReady,
+  );
+  const livePlaybackOnListenLabDevice = Boolean(
+    usingLivePlaybackSnapshot
+    && livePlaybackSnapshot?.device_id
+    && spotifyDeviceIdRef.current
+    && livePlaybackSnapshot.device_id === spotifyDeviceIdRef.current,
+  );
+  const liveReadOnlyMode = usingLivePlaybackSnapshot && !livePlaybackOnListenLabDevice && !liveControlOverrideActive;
+  const shouldUseLiveSnapshotDisplay = liveReadOnlyMode || (usingLivePlaybackSnapshot && !currentTrack);
+  const playerDisplayTrack: PlayerTrackSummary | null = shouldUseLiveSnapshotDisplay
+    ? {
+      name: livePlaybackSnapshot?.name ?? "Spotify Playback",
+      artists: (livePlaybackSnapshot?.artist_names ?? []).join(", ") || "Unknown artist",
+      album: livePlaybackSnapshot?.album_name ?? "Unknown album",
+      image: livePlaybackSnapshot?.image_url ?? null,
+      uri: livePlaybackSnapshot?.uri ?? null,
+      durationMs: Math.max(0, Number(livePlaybackSnapshot?.duration_ms ?? 0)),
+    }
+    : currentTrack;
+  const playerDisplayPaused = shouldUseLiveSnapshotDisplay
+    ? !Boolean(livePlaybackSnapshot?.is_playing)
+    : playbackPaused;
+  const playerDisplayPositionMs = shouldUseLiveSnapshotDisplay
+    ? Math.max(0, liveDerivedProgressMs)
+    : playbackPositionMs;
+  const playerDisplayDurationMs = shouldUseLiveSnapshotDisplay
+    ? Math.max(0, Number(livePlaybackSnapshot?.duration_ms ?? 0))
+    : playbackDurationMs;
+  const livePlaybackControlTooltip = liveReadOnlyMode
+    ? `Playing on ${livePlaybackSnapshot?.device_name ?? "another device"}. Double tap to switch.`
+    : undefined;
+
+  function clampProgress(progressMs: number, durationMs: number) {
+    const safeDuration = Math.max(0, Number(durationMs || 0));
+    const safeProgress = Math.max(0, Number(progressMs || 0));
+    return safeDuration > 0 ? Math.min(safeProgress, safeDuration) : safeProgress;
+  }
   const reloadSecondsRemaining =
     reloadCooldownUntil == null ? 0 : Math.max(0, Math.ceil((reloadCooldownUntil - reloadCountdownNow) / 1000));
   const reloadReady = reloadSecondsRemaining <= 0;
@@ -422,12 +546,16 @@ export function App() {
     const url = new URL(window.location.href);
     if (url.pathname === "/auth/callback") {
       const status = url.searchParams.get("status");
+      const flow = url.searchParams.get("flow");
       setAuthTransitioning(status === "success");
       setStatusMessage(
         status === "success"
           ? "Spotify login succeeded. Session restored."
           : "Spotify login did not complete successfully.",
       );
+      if (flow === "recent_ingest") {
+        setRecentIngestCallbackPending(true);
+      }
       window.history.replaceState({}, "", "/");
     }
   }, []);
@@ -435,6 +563,105 @@ export function App() {
   useEffect(() => {
     void loadSession();
   }, []);
+
+  useEffect(() => {
+    if (!session?.authenticated || experienceMode === "local" || !hasPremiumPlayback) {
+      setLivePlaybackSnapshot(null);
+      setLiveAwaitingNextTrack(false);
+      setLiveControlOverrideUntilMs(null);
+      setLivePlaybackProbeComplete(false);
+      return;
+    }
+
+    let cancelled = false;
+    let pollTimer: number | null = null;
+    const refresh = async () => {
+      await loadCurrentPlaybackSnapshot();
+      if (!cancelled) {
+        setLivePlaybackProbeComplete(true);
+      }
+    };
+
+    void refresh();
+    pollTimer = window.setInterval(() => {
+      if (!cancelled) {
+        void refresh();
+      }
+    }, LIVE_PLAYBACK_POLL_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      if (pollTimer != null) {
+        window.clearInterval(pollTimer);
+      }
+    };
+  }, [experienceMode, hasPremiumPlayback, session?.authenticated, session?.spotify_user_id]);
+
+  useEffect(() => {
+    if (!livePlaybackSnapshot) {
+      liveProgressAnchorRef.current = null;
+      liveEndRefreshRequestedRef.current = false;
+      setLiveDerivedProgressMs(0);
+      return;
+    }
+    const receivedAtMs = Date.now();
+    const durationMs = Math.max(0, Number(livePlaybackSnapshot.duration_ms ?? 0));
+    const progressMs = Math.max(0, Number(livePlaybackSnapshot.progress_ms ?? 0));
+    const correctedBaseProgressMs = clampProgress(progressMs, durationMs);
+    liveProgressAnchorRef.current = {
+      baseProgressMs: correctedBaseProgressMs,
+      receivedAtMs,
+      durationMs,
+    };
+    liveEndRefreshRequestedRef.current = false;
+    setLiveDerivedProgressMs(correctedBaseProgressMs);
+  }, [livePlaybackSnapshot]);
+
+  useEffect(() => {
+    if (!usingLivePlaybackSnapshot || !livePlaybackSnapshot?.is_playing) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      const anchor = liveProgressAnchorRef.current;
+      if (!anchor) {
+        return;
+      }
+      const elapsedSinceReceiptMs = Math.max(0, Date.now() - anchor.receivedAtMs);
+      const next = clampProgress(anchor.baseProgressMs + elapsedSinceReceiptMs, anchor.durationMs);
+      setLiveDerivedProgressMs((current) => (current === next ? current : next));
+      if (
+        anchor.durationMs > 0
+        && next >= anchor.durationMs
+        && !liveEndRefreshRequestedRef.current
+      ) {
+        liveEndRefreshRequestedRef.current = true;
+        setLiveAwaitingNextTrack(true);
+        void loadCurrentPlaybackSnapshot();
+        window.setTimeout(() => {
+          if (session?.authenticated && experienceMode === "full") {
+            void triggerRecentIngestPollForTrackEnd();
+          }
+        }, LIVE_TRACK_END_RECENT_POLL_DELAY_MS);
+      }
+    }, LIVE_PLAYBACK_PROGRESS_TICK_MS);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [experienceMode, livePlaybackSnapshot?.is_playing, session?.authenticated, usingLivePlaybackSnapshot]);
+
+  useEffect(() => {
+    if (usingLivePlaybackSnapshot && pendingSeekMs != null) {
+      setPendingSeekMs(null);
+    }
+  }, [pendingSeekMs, usingLivePlaybackSnapshot]);
+
+  useEffect(() => {
+    if (!recentIngestCallbackPending) {
+      return;
+    }
+    void loadRecentIngestResult();
+  }, [recentIngestCallbackPending]);
 
   useEffect(() => {
     window.localStorage.setItem(EXPERIENCE_MODE_STORAGE_KEY, experienceMode);
@@ -819,6 +1046,39 @@ export function App() {
     return trackId ? `https://open.spotify.com/track/${trackId}` : null;
   }
 
+  function spotifyTrackIdFromUri(trackUri: string | null) {
+    if (!trackUri?.startsWith("spotify:track:")) {
+      return null;
+    }
+    const trackId = trackUri.split(":")[2];
+    return trackId || null;
+  }
+
+  function openPlayerTrackDetails() {
+    if (!playerDisplayTrack || !usingLivePlaybackSnapshot) {
+      return;
+    }
+    const trackId = spotifyTrackIdFromUri(playerDisplayTrack.uri) ?? livePlaybackSnapshot?.item_id ?? null;
+    const trackUrl = spotifyTrackUrl(playerDisplayTrack.uri) ?? (trackId ? `https://open.spotify.com/track/${trackId}` : "");
+    if (!trackUrl) {
+      return;
+    }
+    setSelectedPreview({
+      image: playerDisplayTrack.image,
+      label: playerDisplayTrack.name,
+      meta: playerDisplayTrack.artists || null,
+      detail: playerDisplayTrack.album || null,
+      kind: "track",
+      entityId: trackId,
+      trackUri: playerDisplayTrack.uri,
+      url: trackUrl,
+      trackId,
+      albumId: null,
+      artistName: playerDisplayTrack.artists || null,
+      sourceTrack: null,
+    });
+  }
+
   function formatListeningSince(firstPlayedAt: string | null | undefined) {
     if (!firstPlayedAt) {
       return null;
@@ -899,6 +1159,7 @@ export function App() {
           if (!state) {
             return;
           }
+          setLiveControlOverrideUntilMs(Date.now() + LIVE_PLAYBACK_POLL_INTERVAL_MS);
           setCurrentTrack(currentTrackFromState(state));
           setPlaybackPaused(state.paused);
           setPlaybackPositionMs(state.position ?? 0);
@@ -972,7 +1233,13 @@ export function App() {
   }, [currentTrack?.uri]);
 
   useEffect(() => {
-    if (!hasPremiumPlayback || currentTrack || !profile) {
+    if (
+      !hasPremiumPlayback
+      || currentTrack
+      || !profile
+      || !livePlaybackProbeComplete
+      || usingLivePlaybackSnapshot
+    ) {
       return;
     }
 
@@ -992,7 +1259,7 @@ export function App() {
     setPlaybackPaused(true);
     setPlaybackPositionMs(0);
     setPlaybackDurationMs(0);
-  }, [currentTrack, hasPremiumPlayback, profile]);
+  }, [currentTrack, hasPremiumPlayback, livePlaybackProbeComplete, profile, usingLivePlaybackSnapshot]);
 
   async function playTrackUri(trackUri: string | null) {
     if (!trackUri) {
@@ -1012,7 +1279,10 @@ export function App() {
       });
       await spotifyApiRequest(`/me/player/play?device_id=${encodeURIComponent(deviceId)}`, {
         method: "PUT",
-        body: JSON.stringify({ uris: [trackUri] }),
+        body: JSON.stringify({
+          uris: [trackUri],
+          position_ms: 0,
+        }),
       });
       setPlayerError(null);
     } catch (error) {
@@ -1036,6 +1306,50 @@ export function App() {
     } catch (error) {
       setPlayerError(error instanceof Error ? error.message : "Spotify playback could not be updated.");
     }
+  }
+
+  async function takeOverPlaybackFromLiveSnapshot() {
+    const deviceId = spotifyDeviceIdRef.current;
+    if (!deviceId) {
+      setPlayerError("ListenLab Player is not ready yet.");
+      return;
+    }
+
+    try {
+      await spotifyApiRequest("/me/player", {
+        method: "PUT",
+        body: JSON.stringify({ device_ids: [deviceId], play: true }),
+      });
+      if (playerDisplayTrack?.uri) {
+        await spotifyApiRequest(`/me/player/play?device_id=${encodeURIComponent(deviceId)}`, {
+          method: "PUT",
+          body: JSON.stringify({
+            uris: [playerDisplayTrack.uri],
+            position_ms: Math.max(0, Math.floor(playerDisplayPositionMs)),
+          }),
+        });
+      }
+      setPlayerError(null);
+      setLiveControlOverrideUntilMs(Date.now() + LIVE_PLAYBACK_POLL_INTERVAL_MS);
+      await loadCurrentPlaybackSnapshot();
+    } catch (error) {
+      setPlayerError(error instanceof Error ? error.message : "Spotify playback could not be switched.");
+    }
+  }
+
+  function handlePlayerPrimaryButtonClick() {
+    if (!liveReadOnlyMode) {
+      void togglePlayerPlayback();
+      return;
+    }
+    const now = Date.now();
+    if ((now - liveControlTapMsRef.current) <= LIVE_CONTROL_DOUBLE_TAP_WINDOW_MS) {
+      liveControlTapMsRef.current = 0;
+      void takeOverPlaybackFromLiveSnapshot();
+      return;
+    }
+    liveControlTapMsRef.current = now;
+    setPlayerError(`Double tap to switch from ${livePlaybackSnapshot?.device_name ?? "another device"} to ListenLab Player.`);
   }
 
   async function handlePopupTrackPlayback(trackUri: string | null) {
@@ -1263,6 +1577,9 @@ export function App() {
         setProfileSettingsOpen(false);
         setBrandMenuOpen(false);
         setPlayerMenuOpen(false);
+        setLivePlaybackSnapshot(null);
+        setLivePlaybackProbeComplete(false);
+        setLiveControlOverrideUntilMs(null);
         setCurrentTrack(null);
         setPlayerReady(false);
         setStatusMessage("Not connected yet. Use Spotify login to start the auth flow.");
@@ -1270,12 +1587,124 @@ export function App() {
         setAuthTransitioning(false);
       }
     } catch (error) {
-      setStatusMessage(error instanceof Error ? error.message : "Failed to load session.");
+      setStatusMessage(formatUiErrorMessage(error, "Failed to load session."));
+    }
+  }
+
+  async function loadCurrentPlaybackSnapshot() {
+    try {
+      const response = await fetch(`${apiBaseUrl}/auth/current-playback`, {
+        credentials: "include",
+      });
+      if (!response.ok) {
+        setLivePlaybackSnapshot(null);
+        setLiveAwaitingNextTrack(false);
+        return;
+      }
+      const data = (await response.json()) as CurrentPlaybackResponse;
+      if (data.status === "ok" && data.has_playback && data.snapshot) {
+        setLivePlaybackSnapshot(data.snapshot);
+        setLiveAwaitingNextTrack(false);
+        return;
+      }
+      setLivePlaybackSnapshot(null);
+      setLiveAwaitingNextTrack(false);
+    } catch {
+      setLivePlaybackSnapshot(null);
+      setLiveAwaitingNextTrack(false);
+    }
+  }
+
+  async function triggerRecentIngestPollForTrackEnd() {
+    try {
+      await fetch(`${apiBaseUrl}/auth/recent-ingest/poll-now`, {
+        method: "POST",
+        credentials: "include",
+      });
+    } catch {
+      // Keep track-end UX resilient even if this background ingest trigger fails.
     }
   }
 
   function startLogin() {
     window.location.href = `${apiBaseUrl}/auth/login`;
+  }
+
+  function startRecentIngestLogin() {
+    window.location.href = `${apiBaseUrl}/auth/login?mode=recent_ingest`;
+  }
+
+  async function loadRecentIngestResult() {
+    try {
+      const response = await fetch(`${apiBaseUrl}/auth/recent-ingest/result`, {
+        credentials: "include",
+      });
+      if (!response.ok) {
+        throw new Error(`Recent ingest result failed (${response.status})`);
+      }
+      const data = (await response.json()) as RecentIngestResultResponse;
+      if (!data.has_result) {
+        setRecentIngestResult(null);
+        setStatusMessage("Spotify auth succeeded, but no ingest result was returned.");
+        return;
+      }
+      setRecentIngestResult(data);
+      if (data.auth_succeeded && data.ingest_succeeded) {
+        const earliest = data.earliest_api_played_at ?? "n/a";
+        const latest = data.latest_api_played_at ?? "n/a";
+        setStatusMessage(
+          `Recent ingest succeeded: ${data.row_count ?? 0} rows (${earliest} to ${latest}).`,
+        );
+      } else {
+        setStatusMessage(`Recent ingest failed: ${data.error ?? "unknown error"}`);
+      }
+    } catch (error) {
+      setStatusMessage(
+        error instanceof Error ? error.message : "Failed to load recent ingest result.",
+      );
+    } finally {
+      setRecentIngestCallbackPending(false);
+    }
+  }
+
+  async function runRecentBeforeProbe() {
+    try {
+      const response = await fetch(`${apiBaseUrl}/auth/recent-ingest/probe-before?days=90&limit=50`, {
+        credentials: "include",
+      });
+      const data = (await response.json()) as RecentBeforeProbeResponse;
+      if (!response.ok) {
+        throw new Error(data.detail || `Probe failed (${response.status})`);
+      }
+      setRecentBeforeProbeResult(data);
+      setStatusMessage(
+        `Before-90d probe: ${data.returned_items ?? 0} rows (${data.earliest_played_at ?? "n/a"} to ${data.latest_played_at ?? "n/a"}).`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Before-90d probe failed.";
+      setRecentBeforeProbeResult({ ok: false, detail: message });
+      setStatusMessage(`Before-90d probe failed: ${message}`);
+    }
+  }
+
+  async function runRecentBackfillProbe() {
+    try {
+      const response = await fetch(`${apiBaseUrl}/auth/recent-ingest/probe-backfill?limit=50&max_pages=10`, {
+        credentials: "include",
+      });
+      const data = (await response.json()) as RecentBackfillProbeResponse;
+      if (!response.ok) {
+        throw new Error(data.detail || `Backfill probe failed (${response.status})`);
+      }
+      setRecentBackfillProbeResult(data);
+      setStatusMessage(
+        `Backfill probe: ${data.total_items ?? 0} items across ${data.pages_fetched ?? 0} pages (${data.earliest_played_at ?? "n/a"} to ${data.latest_played_at ?? "n/a"}).`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Backfill probe failed.";
+      setRecentBackfillProbeResult({ ok: false, detail: message });
+      setStatusMessage(`Backfill probe failed: ${message}`);
+    }
   }
 
   async function reconnectSpotify() {
@@ -1397,6 +1826,7 @@ export function App() {
   }
 
   function openAndScrollToSection(section: SectionKey, anchorId: string) {
+    setAppPage("dashboard");
     setOpenSections((current) => ({
       ...current,
       artists: false,
@@ -1614,50 +2044,127 @@ export function App() {
     const consistencyPercent = Math.round(consistency * 100);
     return `${longevity} · ${consistencyPercent}%`;
   }
+  function getTrackPlayCount(track: RecentTrack): number {
+    return Number(track.play_count ?? 0);
+  }
 
+  function getNormalizedPlays(track: RecentTrack, maxPlays: number): number {
+    return getTrackPlayCount(track) / Math.max(1, maxPlays);
+  }
+
+  function getNormalizedLongevity(track: RecentTrack, maxLongevity: number): number {
+    return getTrackLongevityScore(track) / Math.max(1, maxLongevity);
+  }
+
+  function getOldPlaysScore(track: RecentTrack, maxPlays: number): number {
+    return getTrackPlayCount(track) / Math.max(1, maxPlays);
+  }
+
+  function getNewPlaysScore(track: RecentTrack, maxPlays: number): number {
+    const normalized = getTrackPlayCount(track) / Math.max(1, maxPlays);
+    return Math.sqrt(normalized);
+  }
+
+  function getOldLongevityScore(track: RecentTrack, maxLongevity: number): number {
+    return getTrackLongevityScore(track) / Math.max(1, maxLongevity);
+  }
+
+  function getNewLongevityScore(track: RecentTrack, maxLongevity: number): number {
+    const normalized = getTrackLongevityScore(track) / Math.max(1, maxLongevity);
+    return Math.sqrt(normalized);
+  }
+
+  function getOldMixScore(
+    track: RecentTrack,
+    maxPlays: number,
+    maxLongevity: number,
+  ): number {
+    return getOldPlaysScore(track, maxPlays) * 0.58
+      + getOldLongevityScore(track, maxLongevity) * 0.42;
+  }
+
+  function getNewMixScore(
+    track: RecentTrack,
+    maxPlays: number,
+    maxLongevity: number,
+  ): number {
+    return getNewPlaysScore(track, maxPlays) * 0.70
+      + getNewLongevityScore(track, maxLongevity) * 0.30;
+  }
   function sortedTracksForView(section: SectionKey, tracks: RecentTrack[]) {
-    if (section !== "tracksAllTime") {
+    const isCurrentSection = section === "tracksAllTime" || section === "tracksAllTimeCurrent";
+    const isNewSection = section === "tracksAllTimeNew";
+
+    if (!isCurrentSection && !isNewSection) {
       return tracks;
     }
 
     const withMetrics = tracks.some(
       (track) =>
-        Number(track.play_count ?? 0) > 0
-        || Number(track.listening_span_days ?? 0) > 0
-        || getTrackLongevityScore(track) > 0,
+        getTrackPlayCount(track) > 0 ||
+        Number(track.listening_span_days ?? 0) > 0 ||
+        getTrackLongevityScore(track) > 0,
     );
+
     if (!withMetrics) {
       return tracks;
     }
 
     const ranked = [...tracks];
-    const maxPlays = Math.max(1, ...ranked.map((track) => Number(track.play_count ?? 0)));
+    const maxPlays = Math.max(1, ...ranked.map((track) => getTrackPlayCount(track)));
     const maxLongevity = Math.max(1, ...ranked.map((track) => getTrackLongevityScore(track)));
+
     ranked.sort((a, b) => {
-      if (trackRankingMode === "plays") {
-        const playsDelta = Number(b.play_count ?? 0) - Number(a.play_count ?? 0);
-        if (playsDelta !== 0) {
-          return playsDelta;
-        }
-      } else if (trackRankingMode === "mix") {
-        const aScore = Number(a.play_count ?? 0) / maxPlays * 0.58 + getTrackLongevityScore(a) / maxLongevity * 0.42;
-        const bScore = Number(b.play_count ?? 0) / maxPlays * 0.58 + getTrackLongevityScore(b) / maxLongevity * 0.42;
-        const scoreDelta = bScore - aScore;
-        if (Math.abs(scoreDelta) > 1e-6) {
-          return scoreDelta;
+      let aScore = 0;
+      let bScore = 0;
+
+      if (isNewSection) {
+        if (trackRankingMode === "plays") {
+          aScore = getNewPlaysScore(a, maxPlays);
+          bScore = getNewPlaysScore(b, maxPlays);
+        } else if (trackRankingMode === "longevity") {
+          aScore = getNewLongevityScore(a, maxLongevity);
+          bScore = getNewLongevityScore(b, maxLongevity);
+        } else {
+          aScore = getNewMixScore(a, maxPlays, maxLongevity);
+          bScore = getNewMixScore(b, maxPlays, maxLongevity);
         }
       } else {
-        const longevityDelta = getTrackLongevityScore(b) - getTrackLongevityScore(a);
-        if (Math.abs(longevityDelta) > 1e-6) {
-          return longevityDelta;
-        }
-        const spanDelta = Number(b.listening_span_days ?? 0) - Number(a.listening_span_days ?? 0);
-        if (spanDelta !== 0) {
-          return spanDelta;
+        if (trackRankingMode === "plays") {
+          aScore = getOldPlaysScore(a, maxPlays);
+          bScore = getOldPlaysScore(b, maxPlays);
+        } else if (trackRankingMode === "longevity") {
+          aScore = getOldLongevityScore(a, maxLongevity);
+          bScore = getOldLongevityScore(b, maxLongevity);
+        } else {
+          aScore = getOldMixScore(a, maxPlays, maxLongevity);
+          bScore = getOldMixScore(b, maxPlays, maxLongevity);
         }
       }
-      return Number(b.play_count ?? 0) - Number(a.play_count ?? 0);
+
+      const scoreDelta = bScore - aScore;
+      if (Math.abs(scoreDelta) > 1e-6) {
+        return scoreDelta;
+      }
+
+      const playsDelta = getTrackPlayCount(b) - getTrackPlayCount(a);
+      if (playsDelta !== 0) {
+        return playsDelta;
+      }
+
+      const longevityDelta = getTrackLongevityScore(b) - getTrackLongevityScore(a);
+      if (Math.abs(longevityDelta) > 1e-6) {
+        return longevityDelta;
+      }
+
+      const spanDelta = Number(b.listening_span_days ?? 0) - Number(a.listening_span_days ?? 0);
+      if (spanDelta !== 0) {
+        return spanDelta;
+      }
+
+      return 0;
     });
+
     return ranked;
   }
 
@@ -1948,6 +2455,23 @@ export function App() {
     return `${minutes}:${seconds.toString().padStart(2, "0")}`;
   }
 
+  function formatUiErrorMessage(error: unknown, fallback: string) {
+    const raw = error instanceof Error ? error.message : "";
+    const lower = raw.toLowerCase();
+    if (
+      error instanceof TypeError
+      || lower.includes("failed to fetch")
+      || lower.includes("networkerror")
+      || lower.includes("network request failed")
+    ) {
+      return "Can’t reach ListenLab API. Start backend on 127.0.0.1:8000 and refresh.";
+    }
+    if (lower.includes("cors")) {
+      return "Backend blocked by CORS. Use localhost/127.0.0.1 defaults.";
+    }
+    return raw || fallback;
+  }
+
   async function loadProfile() {
     if (experienceMode === "full" && spotifyCooldownActive) {
       setStatusMessage(formatCooldownCopy(reloadSecondsRemaining));
@@ -2083,7 +2607,7 @@ export function App() {
         setRecentRange(hydratedProfile.recent_range);
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to load Spotify profile.";
+      const message = formatUiErrorMessage(error, "Failed to load Spotify profile.");
       setStatusMessage(message);
       setAuthTransitioning(false);
       setStatusHistory((current) => (current.length > 0 ? [...current, `Error: ${message}`] : [message]));
@@ -2196,7 +2720,7 @@ export function App() {
         return [...filtered, "Background expansion complete."];
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to load extended Spotify profile.";
+      const message = formatUiErrorMessage(error, "Failed to load extended Spotify profile.");
       setStatusMessage(message);
       setStatusHistory((current) => {
         const filtered = current.filter((entry) => !entry.startsWith("background "));
@@ -2416,6 +2940,7 @@ export function App() {
     emptyCopy: string,
     unavailableCopy: string,
     unavailableAction?: ReactNode,
+    paged: boolean = true,
   ) {
     if (!available) {
       return (
@@ -2430,10 +2955,15 @@ export function App() {
     }
 
     const rankedItems = sortedTracksForView(section, items);
-    const cappedRows = section === "tracksAllTime" || section === "tracksRecent"
+    const isAllTimeTrackSection =
+      section === "tracksAllTime" ||
+      section === "tracksAllTimeCurrent" ||
+      section === "tracksAllTimeNew";
+
+    const cappedRows = isAllTimeTrackSection || section === "tracksRecent"
       ? capTracksPerAlbum(rankedItems, 1)
       : rankedItems.map((track) => ({ track, hiddenCount: 0 }));
-    const pageRows = visibleItems(section, cappedRows);
+    const pageRows = paged ? visibleItems(section, cappedRows) : cappedRows;
     return (
       <>
         <div className="item-list">
@@ -2449,20 +2979,23 @@ export function App() {
                 primaryBadgeText: row.hiddenCount > 0 ? `+${row.hiddenCount} more` : null,
                 secondaryText: row.track.artist_name ?? "Unknown artist",
                 tertiaryText: row.track.album_name ?? "Unknown album",
-                metricText:
-                  section === "tracksAllTime"
-                    ? (
-                        trackRankingMode === "longevity"
-                          ? formatTrackLongevityMetric(row.track)
-                          : (trackRankingMode === "mix"
-                            ? (
-                                (row.track.play_count != null && row.track.play_count > 0) || (row.track.listening_span_days != null && row.track.listening_span_days > 0)
-                                  ? `${row.track.play_count ?? 0} | ${formatTrackLongevity(row.track) ?? "0d"}`
-                                  : null
-                              )
-                            : (row.track.play_count != null && row.track.play_count > 0 ? `${row.track.play_count}` : null))
-                      )
-                    : null,
+                metricText: isAllTimeTrackSection
+                  ? (
+                      section === "tracksAllTimeNew"
+                        ? `${row.track.play_count ?? 0} | ${formatTrackLongevity(row.track) ?? "0d"}`
+                        : (
+                            trackRankingMode === "longevity"
+                              ? formatTrackLongevityMetric(row.track)
+                              : (trackRankingMode === "mix"
+                                ? (
+                                    (row.track.play_count != null && row.track.play_count > 0) || (row.track.listening_span_days != null && row.track.listening_span_days > 0)
+                                      ? `${row.track.play_count ?? 0} | ${formatTrackLongevity(row.track) ?? "0d"}`
+                                      : null
+                                  )
+                                : (row.track.play_count != null && row.track.play_count > 0 ? `${row.track.play_count}` : null))
+                          )
+                    )
+                  : null,
                 trackUri: row.track.uri ?? null,
                 previewTrack: row.track,
               },
@@ -2473,10 +3006,60 @@ export function App() {
             <div className="list-row list-row-placeholder" key={`${section}-empty-${index}`} aria-hidden="true" />
           ))}
         </div>
-        {renderPaging(section, cappedRows.length)}
+        {paged ? renderPaging(section, cappedRows.length) : null}
       </>
     );
   }
+
+  function renderTracksOnlyPage() {
+  if (!profile) {
+    return null;
+  }
+
+  return (
+    <section className="info-card info-card-wide tracks-only-card" id="tracks-page">
+      <div className="tracks-only-header">
+        <div className="section-column-header">
+          <h2>Tracks</h2>
+          {renderTrackRankingToggle()}
+        </div>
+        <button
+          className="secondary-button tracks-only-back-button"
+          onClick={() => setAppPage("dashboard")}
+          type="button"
+        >
+          Back to dashboard
+        </button>
+      </div>
+      <div className="artists-grid">
+        <div className="artists-column">
+          <h3>Current formula</h3>
+          {renderTrackColumn(
+            "tracksAllTimeCurrent",
+            profile.top_tracks,
+            profile.top_tracks_available,
+            "Spotify returned no top tracks for this account.",
+            quickUnavailableCopy("Top tracks are not available for this session yet. Log out and log back in to grant access."),
+            undefined,
+            false,
+          )}
+        </div>
+        <div className="artists-column">
+          <h3>New formula</h3>
+          {renderTrackColumn(
+            "tracksAllTimeNew",
+            profile.top_tracks,
+            profile.top_tracks_available,
+            "Spotify returned no top tracks for this account.",
+            quickUnavailableCopy("Top tracks are not available for this session yet. Log out and log back in to grant access."),
+            undefined,
+            false,
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
 
   function renderAlbumColumn(
     section: SectionKey,
@@ -2847,7 +3430,7 @@ export function App() {
       await loadExtendedProfile(recentRange, "full");
       setStatusHistory((current) => [...current, "History recompute complete."]);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to recompute history.";
+      const message = formatUiErrorMessage(error, "Failed to recompute history.");
       setStatusMessage(message);
       setStatusHistory((current) => [...current, `History recompute error: ${message}`]);
     } finally {
@@ -2922,7 +3505,7 @@ export function App() {
       setStatusMessage("");
       setStatusHistory((current) => [...current, "Recent sections refreshed."]);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to refresh recent sections.";
+      const message = formatUiErrorMessage(error, "Failed to refresh recent sections.");
       setStatusMessage(message);
       setStatusHistory((current) => [...current, `Recent refresh error: ${message}`]);
     } finally {
@@ -2957,6 +3540,42 @@ export function App() {
               <button className="primary-button top-login-button" onClick={handleAuthAction} type="button">
                 {experienceMode === "local" ? "Open restricted local mode" : "Log in with Spotify"}
               </button>
+              {experienceMode === "full" ? (
+                <button className="secondary-button top-login-button" onClick={startRecentIngestLogin} type="button">
+                  Connect Spotify and ingest recent plays
+                </button>
+              ) : null}
+              {experienceMode === "full" ? (
+                <button className="secondary-button top-login-button" onClick={() => void runRecentBeforeProbe()} type="button">
+                  Probe recent API before 90 days
+                </button>
+              ) : null}
+              {experienceMode === "full" ? (
+                <button className="secondary-button top-login-button" onClick={() => void runRecentBackfillProbe()} type="button">
+                  Probe recent API paging (50 x up to 10)
+                </button>
+              ) : null}
+              {recentIngestResult ? (
+                <p className="empty-copy">
+                  {recentIngestResult.auth_succeeded && recentIngestResult.ingest_succeeded
+                    ? `Recent ingest succeeded: ${recentIngestResult.row_count ?? 0} rows (${recentIngestResult.earliest_api_played_at ?? "n/a"} to ${recentIngestResult.latest_api_played_at ?? "n/a"}).`
+                    : `Recent ingest failed: ${recentIngestResult.error ?? "unknown error"}`}
+                </p>
+              ) : null}
+              {recentBeforeProbeResult ? (
+                <p className="empty-copy">
+                  {recentBeforeProbeResult.ok
+                    ? `Before-90d probe: ${recentBeforeProbeResult.returned_items ?? 0} rows (${recentBeforeProbeResult.earliest_played_at ?? "n/a"} to ${recentBeforeProbeResult.latest_played_at ?? "n/a"}).`
+                    : `Before-90d probe failed: ${recentBeforeProbeResult.detail ?? "unknown error"}`}
+                </p>
+              ) : null}
+              {recentBackfillProbeResult ? (
+                <p className="empty-copy">
+                  {recentBackfillProbeResult.ok
+                    ? `Backfill probe: ${recentBackfillProbeResult.total_items ?? 0} items across ${recentBackfillProbeResult.pages_fetched ?? 0} pages (${recentBackfillProbeResult.earliest_played_at ?? "n/a"} to ${recentBackfillProbeResult.latest_played_at ?? "n/a"}).`
+                    : `Backfill probe failed: ${recentBackfillProbeResult.detail ?? "unknown error"}`}
+                </p>
+              ) : null}
             </div>
           </div>
         ) : null}
@@ -3093,8 +3712,8 @@ export function App() {
                     type="button"
                   >
                     <span className="toolbar-player-icon" aria-hidden="true">
-                      {currentTrack?.image ? <img alt="" className="toolbar-player-cover" src={currentTrack.image} /> : null}
-                      {currentTrack && !playbackPaused ? (
+                      {playerDisplayTrack?.image ? <img alt="" className="toolbar-player-cover" src={playerDisplayTrack.image} /> : null}
+                      {playerDisplayTrack && !playerDisplayPaused ? (
                         <span className="detail-wave-icon">
                           <span />
                           <span />
@@ -3109,18 +3728,30 @@ export function App() {
                   {playerMenuOpen ? (
                     <section className="profile-card top-profile-card profile-menu-card player-menu-card">
                       <div className="player-menu-summary">
-                        {currentTrack?.image ? (
-                          <img alt={`${currentTrack.album} cover`} className="player-menu-image" src={currentTrack.image} />
+                        {playerDisplayTrack?.image ? (
+                          <img alt={`${playerDisplayTrack.album} cover`} className="player-menu-image" src={playerDisplayTrack.image} />
                         ) : null}
 
                         <div className="player-menu-copy">
                           <div className="player-menu-copy-top">
-                            <h2 className="single-line-ellipsis">{currentTrack?.name ?? "ListenLab Player"}</h2>
-                            {currentTrack?.uri ? (
+                            <h2>
+                              {usingLivePlaybackSnapshot && playerDisplayTrack ? (
+                                <button
+                                  className="player-menu-title-button single-line-ellipsis"
+                                  onClick={() => openPlayerTrackDetails()}
+                                  type="button"
+                                >
+                                  {playerDisplayTrack.name ?? "ListenLab Player"}
+                                </button>
+                              ) : (
+                                <span className="single-line-ellipsis">{playerDisplayTrack?.name ?? "ListenLab Player"}</span>
+                              )}
+                            </h2>
+                            {playerDisplayTrack?.uri ? (
                               <a
                                 aria-label="Open in Spotify"
                                 className="player-menu-external"
-                                href={spotifyTrackUrl(currentTrack.uri) ?? undefined}
+                                href={spotifyTrackUrl(playerDisplayTrack.uri) ?? undefined}
                                 rel="noreferrer"
                                 target="_blank"
                               >
@@ -3129,56 +3760,69 @@ export function App() {
                             ) : null}
                           </div>
                           <p className="player-menu-line single-line-ellipsis">
-                            {currentTrack?.artists ?? "Spotify Premium playback"}
+                            {playerDisplayTrack?.artists ?? "Spotify Premium playback"}
                           </p>
                           <p className="player-menu-line player-menu-line-muted single-line-ellipsis">
-                            {currentTrack?.album ?? "Choose something to play"}
+                            {playerDisplayTrack?.album ?? "Choose something to play"}
                           </p>
                         </div>
                       </div>
 
-                      {currentTrack ? (
+                      {playerDisplayTrack ? (
                         <div className="player-progress" aria-label="Playback progress">
                           <input
                             aria-label="Seek playback"
                             className="player-progress-slider"
-                            max={Math.max(playbackDurationMs || currentTrack.durationMs || 0, 1)}
+                            disabled={liveReadOnlyMode}
+                            max={Math.max(playerDisplayDurationMs || playerDisplayTrack.durationMs || 0, 1)}
                             min={0}
                             onChange={(event) => setPendingSeekMs(Number(event.currentTarget.value))}
                             onMouseUp={() => {
-                              if (pendingSeekMs != null) {
+                              if (!liveReadOnlyMode && pendingSeekMs != null) {
                                 void seekPlayer(pendingSeekMs);
                               }
                             }}
                             onTouchEnd={() => {
-                              if (pendingSeekMs != null) {
+                              if (!liveReadOnlyMode && pendingSeekMs != null) {
                                 void seekPlayer(pendingSeekMs);
                               }
                             }}
                             step={1000}
+                            title={usingLivePlaybackSnapshot ? livePlaybackControlTooltip : undefined}
                             type="range"
-                            value={pendingSeekMs ?? playbackPositionMs}
+                            value={pendingSeekMs ?? playerDisplayPositionMs}
                           />
                           <div className="player-progress-times">
-                            <span>{formatPlaybackClock(pendingSeekMs ?? playbackPositionMs)}</span>
-                            <span>{formatPlaybackClock(playbackDurationMs || currentTrack.durationMs || 0)}</span>
+                            <span>{formatPlaybackClock(pendingSeekMs ?? playerDisplayPositionMs)}</span>
+                            <span>{formatPlaybackClock(playerDisplayDurationMs || playerDisplayTrack.durationMs || 0)}</span>
                           </div>
                         </div>
                       ) : null}
 
                       <div className="actions actions-centered actions-in-card">
-                        <button
-                          className="primary-button"
-                          disabled={!currentTrack || !playerReady}
-                          onClick={() => void togglePlayerPlayback()}
-                          type="button"
-                        >
-                          {playbackPaused ? "Play" : "Pause"}
-                        </button>
+                        <span title={livePlaybackControlTooltip}>
+                          <button
+                            className={`primary-button${liveReadOnlyMode ? " primary-button-readonly" : ""}`}
+                            disabled={!playerDisplayTrack || !playerReady}
+                            onClick={() => handlePlayerPrimaryButtonClick()}
+                            onDoubleClick={() => {
+                              if (liveReadOnlyMode) {
+                                liveControlTapMsRef.current = 0;
+                                void takeOverPlaybackFromLiveSnapshot();
+                              }
+                            }}
+                            type="button"
+                          >
+                            {playerDisplayPaused ? "Play" : "Pause"}
+                          </button>
+                        </span>
                       </div>
 
+                      {usingLivePlaybackSnapshot && liveAwaitingNextTrack ? (
+                        <p className="empty-copy">Track ended. Checking for the next song...</p>
+                      ) : null}
                       {playerError ? <p className="empty-copy">{playerError}</p> : null}
-                      {!playerReady && !playerError ? <p className="empty-copy">Connecting to Spotify player...</p> : null}
+                      {!usingLivePlaybackSnapshot && !playerReady && !playerError ? <p className="empty-copy">Connecting to Spotify player...</p> : null}
                     </section>
                   ) : null}
                 </div>
@@ -3303,6 +3947,11 @@ export function App() {
                 </div>
               </div>
             </nav>
+            {appPage === "tracksOnly" ? (
+              <div className="dashboard-grid">
+                {renderTracksOnlyPage()}
+              </div>
+            ) : (
             <div className="dashboard-grid">
               {renderDualSectionCard({
                 title: renderSectionTitle("Activity", "recent_likes"),
@@ -3360,7 +4009,16 @@ export function App() {
                 leftTitle: (
                   <div className="section-column-header">
                     <h3>All time</h3>
-                    {renderTrackRankingToggle()}
+                    <div className="section-column-header-actions">
+                      {renderTrackRankingToggle()}
+                      <button
+                        className="secondary-button tracks-page-link-button"
+                        onClick={() => setAppPage("tracksOnly")}
+                        type="button"
+                      >
+                        Open tracks page
+                      </button>
+                    </div>
                   </div>
                 ),
                 rightTitle: renderRecentRangeHeader(),
@@ -3480,6 +4138,7 @@ export function App() {
 
               {renderPlaylistsSection()}
             </div>
+            )}
           </>
         )}
         </section>

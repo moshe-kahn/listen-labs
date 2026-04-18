@@ -5,11 +5,13 @@ This document is the focused source of truth for the current raw listening inges
 
 It covers:
 - raw SQLite tables
+- canonical-event membership for duplicate source rows
 - source-row and cross-source identity
 - `ms_played` method precedence
 - Spotify recent-play ingest behavior
 - Spotify history-dump ingest behavior
-- current performance and instrumentation notes
+- live playback observational evidence capture
+- ingest-run utilities, validation scripts, and current performance notes
 
 ## Current Scope
 The raw ingest layer is responsible for:
@@ -24,6 +26,10 @@ The raw ingest layer is not yet responsible for:
 - fact/dimension modeling
 - fuzzy matching
 - canonical song clustering
+
+The live playback evidence layer is responsible for:
+- capturing current-playback observations for debugging and skip/transition analysis
+- staying separate from canonical confirmed play history
 
 ## SQLite Tables
 
@@ -65,6 +71,8 @@ Key fields:
   - `played_at`
   - `ms_played`
   - `ms_played_method`
+  - `duplicate_row_count`
+  - `duplicate_merge_strategy`
   - `track_duration_ms`
 - history/raw context
   - `reason_start`
@@ -82,6 +90,41 @@ Key fields:
   - `track_name_raw`
   - `artist_name_raw`
   - `album_name_raw`
+- payload retention
+  - `raw_payload_json`
+
+### `raw_play_event_membership`
+Stores every observed source row that belongs to a canonical raw event.
+
+Key fields:
+- `canonical_event_id`
+- `source_row_key`
+- `source_type`
+
+### `live_playback_event`
+Stores observational playback snapshots from the current-playback endpoint.
+
+Key fields:
+- observation
+  - `observed_at`
+  - `user_id`
+  - `spotify_user_id`
+  - `source`
+  - `has_playback`
+- playback snapshot
+  - `item_type`
+  - `item_id`
+  - `item_name`
+  - `spotify_track_uri`
+  - `artist_names_json`
+  - `album_name`
+  - `progress_ms`
+  - `duration_ms`
+  - `is_playing`
+  - `device_id`
+  - `device_name`
+  - `device_type`
+  - `spotify_timestamp_ms`
 - payload retention
   - `raw_payload_json`
 
@@ -169,17 +212,20 @@ This is intentionally a fallback, not source truth.
 ## Upgrade Rules
 Current upgrade matching is two-stage:
 
-1. exact `source_row_key`
+1. exact `source_row_key` membership
 2. if no exact source-row match and `cross_source_event_key` is present:
    exact `cross_source_event_key`
 
 If a matching row is found:
 - compare incoming `ms_played_method` rank
 - upgrade only if the incoming method is better
+- attach the new `source_row_key` into `raw_play_event_membership` when it is a cross-source duplicate member
 
 Current upgrade behavior:
 - update `ms_played`
 - update `ms_played_method`
+- increment `duplicate_row_count` when a new duplicate member is attached
+- record `duplicate_merge_strategy`
 - preserve/upgrade `track_duration_ms`
 - preserve/upgrade raw context fields with `COALESCE(...)`
 
@@ -217,6 +263,7 @@ For a sorted batch:
 This means:
 - first row in a batch usually stays `default_guess`
 - plausible adjacent rows can improve to `api_chronology`
+- sync summaries now also report earliest/latest `played_at`, already-seen source rows, and merged duplicate members
 
 ## Spotify History-Dump Ingest
 
@@ -284,7 +331,45 @@ This is only a narrow sample, not a full-history benchmark.
 - no artist/album aggregation on top of raw rows yet
 - no final analytics model consuming the raw DB as the main source yet
 - chronology estimation is heuristic, not source truth
+- live playback observations are not yet promoted directly to canonical plays
 - full-history import benchmarking still needs a controlled larger sample after the migration recovery and transaction refactor
+- real history/API overlap validation is still pending on a dataset with substantial real `spotify_recent` rows; exact end-time equality has not yet been validated on real overlapping data and should be revisited after a fresh overlap-producing ingest
+
+## Live Playback + Durable Ingest Boundary
+- `live_playback_event` is observational evidence, not canonical play history
+- canonical durable rows still come from the existing recent-play/history ingest pipeline
+- when the UI detects a local track end, it can trigger one delayed `POST /auth/recent-ingest/poll-now`
+- this keeps durable inserts in one place (recent-play ingest and dedupe logic) while still capturing richer live context
+
+## Utilities and Validation Scripts
+
+### `backend/scripts/validate_data_foundation.py`
+Purpose:
+- build an isolated validation SQLite database
+- ingest history files with `continue_on_error=True`
+- run a merge-validation matrix
+- print a unified top-track sample derived from raw data
+
+### `backend/scripts/db_ingest_run_hygiene_smoke.py`
+Purpose:
+- smoke-test ingest-run creation, listing, lookup, and deletion with dependent raw rows
+
+### `backend/scripts/probe_spotify_recent_before.py`
+Purpose:
+- probe Spotify recently-played behavior with an optional `before` cursor outside the main app flow
+
+### `backend/scripts/get_current_playback_for_user.py` and `poll_recent_for_user.py`
+Purpose:
+- inspect current-playback behavior and one-shot recent-play polling for a stored user token during local debugging
+
+## Duplicate Event Semantics TODO
+- distinct duplicate-member rows have been observed for the same logical event with differing `reason_start`, `reason_end`, `offline`, `platform`, and occasionally `skipped`
+- current merge rule remains:
+  - keep the best canonical `ms_played`
+  - do not sum `ms_played`
+- future investigation:
+  - determine whether any duplicate-member rows represent truly non-overlapping resumed segments that would justify additive `ms_played`
+  - do not change current merge logic until that is demonstrated with real evidence
 
 ## Recommended Next Use
 This raw ingest layer is ready to support:

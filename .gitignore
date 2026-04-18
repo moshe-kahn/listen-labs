@@ -4,13 +4,21 @@ venv/
 __pycache__/
 *.pyc
 .env
+backend/.env
+frontend/.env
+.env.local
+.env.*.local
 
 # Logs / temp
 *.log
 backend/data/cache/
 backend/data/logs/
+backend/data/validation/
 backend/data/*.sqlite3
 backend/data/*.sqlite3-*
+backend/data/*.copy
+backend/data/*.copy-*
+backend/scripts/__pycache__/
 
 # VS Code
 .vscode/

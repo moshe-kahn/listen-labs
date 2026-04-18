@@ -90,6 +90,8 @@ Ship a trustworthy authenticated dashboard that exposes the raw listening signal
 - local snapshot fallback for selected Spotify-only sections
 - on-disk cache layers for local history insights, per-user recent sections, and shared static metadata
 - playback controls and related player UI states
+- dedicated recent-ingest auth/probe controls for validating recently-played API behavior
+- a tracks-only comparison page for current vs new all-time ranking formulas
 - multiple dashboard and popover usability refinements
 
 ## Milestone 3 - Data Collection and Artist Aggregation
@@ -114,6 +116,8 @@ Collect the core library signals and normalize them into artist-level records.
 - raw event ingestion from Spotify extended streaming history into SQLite
 - conservative replay overlap and early-stop paging for recent-play sync
 - source-row idempotency plus conservative cross-source upgrade matching
+- canonical-event membership tracking for duplicate source rows
+- live playback observation capture as a separate evidence layer
 - aggregation pipeline that produces `ArtistProfile` records
 - unit-tested normalization logic for multi-artist tracks and album relationships
 
@@ -236,6 +240,7 @@ These are active issues discovered during current dashboard work and should be t
   - `default_guess`
 - recent-play API rows can upgrade from `default_guess` to `api_chronology`
 - history-dump rows can upgrade API rows to `history_source`
+- duplicate source rows can be attached to one canonical event through `raw_play_event_membership`
 - current conservative cross-source identity is:
   - canonical UTC `played_at`
   - plus `spotify_track_id` if available, otherwise `spotify_track_uri`
@@ -245,6 +250,11 @@ These are active issues discovered during current dashboard work and should be t
   - mapping time
   - DB ingest time
   - total elapsed time
+- current supporting utilities also include:
+  - ingest-run hygiene smoke testing
+  - isolated data-foundation validation runs
+  - current-playback polling and per-user diagnostics
+  - recent-play API probe scripts
 
 ## Post-MVP Backlog
 These items are explicitly deferred until after the MVP is stable.

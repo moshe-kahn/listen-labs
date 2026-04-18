@@ -60,6 +60,7 @@ Current note:
 - the dashboard now includes a loading handoff after Spotify auth plus a persistent top navigation bar for jumping between sections
 - the dashboard also supports a restricted local mode so saved history- and cache-backed sections remain usable when Spotify is unavailable or rate-limited
 - the backend now also persists raw play events from both Spotify recent-play API data and Spotify extended streaming history in a local SQLite database
+- the current calibration workflow also includes recent-ingest probe/debug flows, live playback observation, and a dedicated tracks comparison page for testing ranking formulas against the same data
 
 ## Domain Vocabulary
 ### Overlooked artist
@@ -76,6 +77,12 @@ The rule that the exact same source event should not be inserted twice. This is 
 
 ### Cross-source upgrade
 The rule that the same logical listen can be improved by a better source later. This is currently handled conservatively through `cross_source_event_key`.
+
+### Canonical raw event
+The single stored `raw_play_event` row that represents one logical play after duplicate source rows have been merged through membership tracking.
+
+### Live playback observation
+An observational current-playback snapshot captured for debugging and transition analysis. It is useful evidence, but it is not canonical durable play history by itself.
 
 ### `ArtistProfile`
 The internal artist-level aggregate that combines all gathered signals into one normalized record. This is the canonical unit for scoring.
@@ -131,6 +138,7 @@ Additional implementation rule:
 - exported Spotify extended streaming history can be used as a calibration aid for development and power users, but formulas must remain reliable for users who only grant live Spotify API access
 - stable favorites and history-enriched sections may be cached, but recent activity should stay fresh enough to reflect current listening
 - once static artist or album metadata such as names, covers, and Spotify URLs is observed, it should be reusable from shared cache rather than treated as per-user state
+- local validation databases, debug logs, and SQLite copies are disposable runtime artifacts, not product data that should be committed
 
 ## UX Priorities
 - Make the main call to action obvious.
@@ -161,3 +169,4 @@ The MVP succeeds when:
 - Fix the incorrect track count still shown for "Chronicles of a Diamond."
 - Improve local-mode image persistence and hydration so artist and album artwork survives mode switches more reliably.
 - Improve recent album ranking so 4-week and 6-month windows do not collapse to overly sparse results.
+- Use the new track-formula comparison page, live-playback observations, and raw-data validation scripts to tighten ranking confidence before broader product expansion.

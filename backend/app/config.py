@@ -15,6 +15,7 @@ class Settings:
     spotify_client_id: str
     spotify_client_secret: str
     spotify_redirect_uri: str
+    listenlab_token_encryption_key: str
     frontend_url: str
     session_secret: str
     allowed_origin: str
@@ -59,6 +60,7 @@ def get_settings() -> Settings:
         spotify_client_id=_read_env("SPOTIFY_CLIENT_ID"),
         spotify_client_secret=_read_env("SPOTIFY_CLIENT_SECRET"),
         spotify_redirect_uri=_read_env("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8000/auth/callback"),
+        listenlab_token_encryption_key=_read_env("LISTENLAB_TOKEN_ENCRYPTION_KEY"),
         frontend_url=_read_env("FRONTEND_URL", "http://127.0.0.1:5173"),
         session_secret=_read_env("SESSION_SECRET", "change-me"),
         allowed_origin=default_origin,

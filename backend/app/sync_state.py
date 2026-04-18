@@ -169,7 +169,10 @@ def ingest_spotify_recent_rows(
     row_count = 0
     inserted_count = 0
     duplicate_count = 0
+    already_seen_source_row_count = 0
+    merged_duplicate_row_count = 0
     max_played_at: str | None = None
+    min_played_at: str | None = None
 
     try:
         for row in rows:
@@ -206,30 +209,54 @@ def ingest_spotify_recent_rows(
 
             action = str(row_result["action"])
             raw_play_event_id = int(row_result["row_id"])
+            match_type = str(row_result.get("match_type") or "")
 
             if action == "unchanged":
                 duplicate_count += 1
+                if match_type == "source_row_key":
+                    already_seen_source_row_count += 1
                 file_logger.debug(
-                    "event=spotify_recent_row_result run_id=%s row_number=%s source_row_key=%s played_at=%s result=%s",
+                    "event=spotify_recent_row_result run_id=%s row_number=%s source_row_key=%s played_at=%s match_type=%s result=%s",
                     run_id,
                     row_count,
                     source_row_key,
                     played_at,
+                    match_type,
                     "duplicate",
+                )
+            elif action == "merged_duplicate_row":
+                merged_duplicate_row_count += 1
+                file_logger.debug(
+                    "event=spotify_recent_row_result run_id=%s row_number=%s source_row_key=%s played_at=%s match_type=%s result=%s raw_play_event_id=%s",
+                    run_id,
+                    row_count,
+                    source_row_key,
+                    played_at,
+                    match_type,
+                    action,
+                    raw_play_event_id,
                 )
             else:
                 inserted_count += 1
                 file_logger.debug(
-                    "event=spotify_recent_row_result run_id=%s row_number=%s source_row_key=%s played_at=%s result=%s raw_play_event_id=%s",
+                    "event=spotify_recent_row_result run_id=%s row_number=%s source_row_key=%s played_at=%s match_type=%s result=%s raw_play_event_id=%s",
                     run_id,
                     row_count,
                     source_row_key,
                     played_at,
+                    match_type,
                     action,
                     raw_play_event_id,
                 )
 
             max_played_at = _max_iso_utc_timestamp(max_played_at, played_at)
+            if min_played_at is None:
+                min_played_at = played_at
+            else:
+                current_min = datetime.fromisoformat(min_played_at.replace("Z", "+00:00"))
+                candidate = datetime.fromisoformat(played_at.replace("Z", "+00:00"))
+                if candidate < current_min:
+                    min_played_at = played_at
 
         completed_at = _utc_now_iso()
         complete_spotify_recent_sync_run(
@@ -259,6 +286,10 @@ def ingest_spotify_recent_rows(
         "row_count": row_count,
         "inserted_count": inserted_count,
         "duplicate_count": duplicate_count,
+        "already_seen_source_row_count": already_seen_source_row_count,
+        "merged_duplicate_row_count": merged_duplicate_row_count,
+        "earliest_played_at": min_played_at,
+        "latest_played_at": max_played_at,
         "last_successful_played_at": max_played_at,
     }
 

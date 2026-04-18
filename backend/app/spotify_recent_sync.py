@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import logging
 import os
 from datetime import UTC, datetime
@@ -118,13 +117,14 @@ async def sync_spotify_recent_plays(
     try:
         start_point = get_spotify_recent_sync_start_point()
         before_cursor: str | None = None
+        fetch_after_played_at: str | None = start_point["fetch_after_played_at"]
         rows_to_ingest: list[dict[str, Any]] = []
 
         while True:
             try:
                 page = await fetch_spotify_recent_play_page(
                     access_token,
-                    after_played_at=start_point["fetch_after_played_at"],
+                    after_played_at=fetch_after_played_at,
                     before_cursor=before_cursor,
                     limit=limit,
                 )
@@ -156,6 +156,9 @@ async def sync_spotify_recent_plays(
             )
             rows_to_ingest.extend(kept_rows)
 
+            # Spotify recently-played endpoint rejects requests that include both
+            # "after" and "before". Use "after" only for the initial page.
+            fetch_after_played_at = None
             before_cursor = page["before_cursor"]
             if should_stop or before_cursor is None:
                 break
@@ -180,6 +183,10 @@ async def sync_spotify_recent_plays(
             "row_count": ingest_summary["row_count"],
             "inserted_count": ingest_summary["inserted_count"],
             "duplicate_count": ingest_summary["duplicate_count"],
+            "already_seen_source_row_count": ingest_summary.get("already_seen_source_row_count", 0),
+            "merged_duplicate_row_count": ingest_summary.get("merged_duplicate_row_count", 0),
+            "earliest_played_at": ingest_summary.get("earliest_played_at"),
+            "latest_played_at": ingest_summary.get("latest_played_at"),
             "last_successful_played_at": ingest_summary["last_successful_played_at"],
             "fetch_after_played_at": ingest_summary["fetch_after_played_at"],
         }

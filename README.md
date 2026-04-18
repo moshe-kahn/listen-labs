@@ -25,7 +25,7 @@ Planned MVP components:
 
 This repository now includes:
 - React dashboard for authenticated Spotify snapshots
-- FastAPI backend with Spotify OAuth and session-based auth
+- FastAPI backend with Spotify OAuth, encrypted token persistence, and token-backed session restore
 - live profile, playlists, recent listening, liked tracks, top tracks, top artists, and top albums views
 - playback controls and session-aware player UI
 - restricted local mode, full mode, and a test path for probing Spotify availability
@@ -33,9 +33,14 @@ This repository now includes:
 - section-level caching for live data, history-derived favorites, history enrichment, and saved Spotify-only sections
 - on-disk local analysis cache plus shared static metadata cache for artist and album artwork
 - SQLite-backed raw play-event ingestion with schema migrations
-- Spotify recent-play ingest with replay overlap, conservative early-stop paging, and chronology-based `ms_played` estimation
+- Spotify recent-play ingest with replay overlap, conservative early-stop paging, chronology-based `ms_played` estimation, and a dedicated connect-and-ingest OAuth path
 - Spotify history-dump ingest with cross-source upgrade support into the same raw-play table
-- a post-login loading handoff plus sticky dashboard navigation, account/project popovers, and multiple dashboard UI polish passes
+- duplicate-member tracking for canonical raw events, ingest-run hygiene helpers, and a unified top-track query over the raw SQLite store
+- observational live playback snapshot capture into a separate SQLite evidence table (`live_playback_event`)
+- encrypted Spotify token persistence, token-backed session restore, and backend helpers for current-playback capture plus recent-play polling
+- backend validation, polling, and ingest-debug scripts for merge behavior, run cleanup, playback observation, and recent-play API probing
+- a post-login loading handoff plus sticky dashboard navigation, account/project popovers, a track-formula comparison page, and multiple dashboard UI polish passes
+- Vite `/api` proxying so local frontend development can use relative API paths instead of hard-coded backend origins
 
 The core overlooked-artist analysis flow and playlist generation are still not implemented.
 
@@ -94,13 +99,23 @@ Build toward a web app that:
 ## Current Ingest Design
 
 - `raw_play_event` stores source-faithful play rows from Spotify recent-play API ingest and Spotify history-dump ingest
+- `raw_play_event_membership` links multiple source rows to one canonical raw event when cross-source duplicates are merged
 - `ingest_run` tracks each import/sync run
 - `spotify_sync_state` tracks recent-play replay boundaries and sync lifecycle metadata
+- `live_playback_event` stores observational current-playback snapshots as a separate evidence layer (not canonical play history)
 - recent-play rows start with `ms_played_method = default_guess` and can improve to `api_chronology`
 - history-dump rows ingest with `ms_played_method = history_source`
 - method precedence is:
   - `history_source > api_chronology > default_guess`
 - dedupe and upgrade matching is:
-  - exact `source_row_key` first
+  - exact `source_row_key` membership first
   - then conservative `cross_source_event_key`
 - `cross_source_event_key` currently uses canonical UTC `played_at` plus Spotify track identity
+- end-of-track UI detection can trigger a one-shot recent-play poll (`POST /auth/recent-ingest/poll-now`) so durable rows still come through the existing recently-played ingest pipeline
+- merged duplicate source rows increment duplicate counters instead of creating extra canonical rows
+
+## Local Safety Notes
+
+- local runtime artifacts under `backend/data/` are disposable and should stay uncommitted
+- validation databases and SQLite copy files are local-only debug outputs
+- `backend/.env` and `frontend/.env` should stay ignored
