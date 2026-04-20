@@ -83,8 +83,8 @@ The rule that the exact same source event should not be inserted twice. This is 
 ### Cross-source upgrade
 The rule that the same logical listen can be improved by a better source later. This is currently handled conservatively through `cross_source_event_key`.
 
-### Canonical raw event
-The single stored `raw_play_event` row that represents one logical play after duplicate source rows have been merged through membership tracking.
+### Canonical play event
+The single logical listen stored in `fact_play_event`, with provenance links back to `raw_spotify_recent` and/or `raw_spotify_history`.
 
 ### Live playback observation
 An observational current-playback snapshot captured for debugging and transition analysis. It is useful evidence, but it is not canonical durable play history by itself.

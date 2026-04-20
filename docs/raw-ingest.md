@@ -5,31 +5,98 @@ This document is the focused source of truth for the current raw listening inges
 
 It covers:
 - raw SQLite tables
+- split raw Spotify provenance tables and canonical play-event facts
 - canonical-event membership for duplicate source rows
 - source-row and cross-source identity
 - `ms_played` method precedence
 - Spotify recent-play ingest behavior
 - Spotify history-dump ingest behavior
 - live playback observational evidence capture
+- ingest-run reliability and timing persistence
 - ingest-run utilities, validation scripts, and current performance notes
 
 ## Current Scope
 The raw ingest layer is responsible for:
 - storing source-faithful play events before higher-level scoring
 - preserving enough provenance to improve a row when better source data arrives later
+- maintaining split raw observations (`raw_spotify_recent`, `raw_spotify_history`)
+- projecting canonical play-event facts (`fact_play_event` + link tables)
 - tracking ingest runs
 - tracking Spotify recent-sync replay state
 
 The raw ingest layer is not yet responsible for:
 - artist-level aggregation
 - final ranking/scoring
-- fact/dimension modeling
 - fuzzy matching
 - canonical song clustering
 
 The live playback evidence layer is responsible for:
 - capturing current-playback observations for debugging and skip/transition analysis
 - staying separate from canonical confirmed play history
+
+## 2026-04-20 Performance Note (History Ingest Insert Cliff)
+
+### Root cause
+- History ingest slowed dramatically only when rows became newly inserted.
+- The hot-path lookup in `raw_play_event` by `cross_source_event_key` was table-scanning because the expected index was missing.
+
+### Fix applied
+- Added migration `15` creating:
+  - `idx_raw_play_event_cross_source_event_key` on `raw_play_event(cross_source_event_key)` (partial index where key is not null).
+
+### Before/after
+- Before fix (insert phase): roughly `~67,200 ms / 1000` inserted rows.
+- After fix (insert phase): roughly `~666 ms / 1000` inserted rows.
+- Duplicate-row path remained fast (`~136 ms / 1000` after fix).
+- Result: insert cliff materially removed (~100x reduction in inserted-row incremental cost).
+
+### Regression guard
+- Keep timing instrumentation enabled in history ingest and projector paths:
+  - file discovery/read/parse
+  - mapping
+  - raw inserts
+  - matcher
+  - projector
+  - final commit
+
+### Local test-run note
+- In this environment, `pytest` is currently unavailable (`No module named pytest`).
+- Keep added/updated tests in-repo; do not block targeted ingest/fallback changes on local `pytest` execution until the test dependency is installed.
+
+## 2026-04-20 Reliability Note (Heartbeat + Timing Persistence)
+
+### What changed
+- `ingest_run` now stores lease/heartbeat state:
+  - `last_heartbeat_at`
+- `ingest_run` now stores queryable phase timings:
+  - `file_discovery_ms`
+  - `file_read_ms`
+  - `file_parse_ms`
+  - `mapping_ms`
+  - `raw_inserts_ms`
+  - `matcher_ms`
+  - `projector_ms`
+  - `downstream_pipeline_ms`
+  - `final_commit_ms`
+  - `total_duration_ms`
+
+### Stale recovery policy (safer startup behavior)
+- Startup stale-run recovery now evaluates staleness using:
+  - `COALESCE(last_heartbeat_at, started_at)`
+- A run is considered stale only when:
+  - `status='running'`
+  - `completed_at IS NULL`
+  - heartbeat/start time is older than cutoff window.
+- Recovery transition remains conservative:
+  - mark stale run as `failed`
+  - set `completed_at` to recovery time
+  - ensure `error_count >= 1`
+- This reduces false recovery for legitimately active long runs compared with `started_at`-only checks.
+
+### Timing persistence behavior
+- Both insert runs and duplicate-only runs persist phase timings on `ingest_run`.
+- Older `ingest_run` rows remain valid with null values in new timing columns.
+- The same phases remain available in returned summary payloads and logs.
 
 ## SQLite Tables
 
@@ -47,6 +114,18 @@ Key fields:
 - `inserted_count`
 - `duplicate_count`
 - `error_count`
+- `last_heartbeat_at`
+- timing fields:
+  - `file_discovery_ms`
+  - `file_read_ms`
+  - `file_parse_ms`
+  - `mapping_ms`
+  - `raw_inserts_ms`
+  - `matcher_ms`
+  - `projector_ms`
+  - `downstream_pipeline_ms`
+  - `final_commit_ms`
+  - `total_duration_ms`
 
 ### `spotify_sync_state`
 Tracks the recent-play replay boundary and sync lifecycle metadata.
@@ -92,6 +171,21 @@ Key fields:
   - `album_name_raw`
 - payload retention
   - `raw_payload_json`
+
+### `raw_spotify_recent`
+Stores raw recent-play observations with source-specific confidence/fallback metadata.
+
+### `raw_spotify_history`
+Stores raw extended-history observations with source timing/completion semantics.
+
+### `fact_play_event`
+Canonical logical listen event with source precedence applied.
+
+### `fact_play_event_recent_link` / `fact_play_event_history_link`
+Provenance link tables from canonical facts back to source-specific raw rows.
+
+### `v_fact_play_event_with_sources`
+Compatibility/query view exposing canonical fact fields and source link IDs/match tiers.
 
 ### `raw_play_event_membership`
 Stores every observed source row that belongs to a canonical raw event.
@@ -204,10 +298,31 @@ This matters because:
 
 ### Current default guess
 For Spotify recent-play API rows:
-- `ms_played = int(track_duration_ms * 0.65)`
+- `ms_played = track_duration_ms`
 - `ms_played_method = 'default_guess'`
 
 This is intentionally a fallback, not source truth.
+
+### Fallback classification note (2026-04-20)
+- Introduced `fallback_short_transition` to isolate a narrow cohort of problematic fallback rows without changing matcher behavior or canonical precedence.
+- Current assignment split:
+  - `api_chronology` rows keep high-confidence timing and no fallback class.
+  - non-chronology rows default to `fallback_likely_complete`.
+  - non-chronology rows are assigned `fallback_short_transition` when prior-gap signal indicates likely transition behavior:
+    - `prev_gap_ms > 2 * track_duration_ms` (within the ingest batch chronology).
+- First targeted cap simulation for `fallback_short_transition` (`min(track_duration_ms, min(45000, 0.25 * track_duration_ms))`) was rejected:
+  - it improved the isolated worst cohort,
+  - but worsened aggregate error across fallback rows and across all matched rows.
+- Resulting state:
+  - classification/isolation improved,
+  - estimate behavior unchanged for now,
+  - no further heuristic broadening until a better short-transition estimate rule is validated.
+
+### Reader Naming Transition
+- `list_raw_play_events(...)` currently returns canonicalized play-event rows for compatibility.
+- New canonical-first entrypoint: `list_canonical_play_events(...)`.
+- During transition, keep `list_raw_play_events(...)` as a compatibility wrapper to avoid breaking callers.
+- Raw-oriented ingest/idempotency/backfill readers remain explicitly raw and unchanged.
 
 ## Upgrade Rules
 Current upgrade matching is two-stage:
@@ -354,6 +469,16 @@ Purpose:
 Purpose:
 - smoke-test ingest-run creation, listing, lookup, and deletion with dependent raw rows
 
+### `backend/scripts/regression_ingest_pipeline.py`
+Purpose:
+- end-to-end reliability regression over ingest -> canonical projection -> downstream pipeline.
+- validates:
+  - ingest completion
+  - canonical link integrity
+  - no duplicate/multi-link violations
+  - duplicate-only rerun skips downstream pipeline
+  - heartbeat/timing fields are persisted on `ingest_run`
+
 ### `backend/scripts/probe_spotify_recent_before.py`
 Purpose:
 - probe Spotify recently-played behavior with an optional `before` cursor outside the main app flow
@@ -376,3 +501,19 @@ This raw ingest layer is ready to support:
 - controlled larger history-import timing tests
 - artist/album aggregation built from raw rows
 - later scoring work that can distinguish `history_source` from estimated durations
+
+### Post-ingest downstream pipeline
+After history ingest + canonical projection, the history file flow now supports a downstream entity pipeline in the same run result:
+- `backfill_spotify_source_entities`
+- `backfill_local_text_entities`
+- `merge_conservative_same_album_release_track_duplicates`
+- `refresh_conservative_analysis_track_links`
+
+Current behavior:
+- enabled by default for history-file ingest entrypoints
+- skipped automatically when `inserted_count == 0` (duplicate-only reruns)
+- emits `downstream_pipeline_summary` and `downstream_pipeline_ms` in ingest timing output
+
+Note:
+- this pipeline advances source/release/analysis layers
+- it now also refreshes conservative composition links in `track_relationship` from shared `analysis_track_map` groupings (`relationship_type='same_composition'`, `match_method='analysis_track_group'`)

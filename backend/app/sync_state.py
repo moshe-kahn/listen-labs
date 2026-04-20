@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
+from time import perf_counter
 from typing import Any
 from uuid import uuid4
 
@@ -10,11 +11,16 @@ from backend.app.db import (
     get_spotify_sync_state,
     insert_ingest_run,
     insert_or_upgrade_raw_play_event,
+    insert_raw_spotify_recent_observation,
+    patch_ingest_run_heartbeat,
+    patch_ingest_run_timing_phases,
     patch_spotify_sync_state,
 )
+from backend.app.play_event_projector import reconcile_fact_play_events_for_ingest_run
 
 logger = logging.getLogger("listenlabs.sync")
 file_logger = logging.getLogger("listenlabs.sync.file")
+HEARTBEAT_INTERVAL_SECONDS = 15.0
 
 
 def _max_iso_utc_timestamp(a: str | None, b: str | None) -> str | None:
@@ -38,6 +44,47 @@ def _normalize_skipped(value: Any) -> int | None:
     if value in (0, False):
         return 0
     return 1
+
+
+def _estimate_recent_fallback_metadata(row: dict[str, Any]) -> tuple[str, str | None]:
+    method = str(row.get("ms_played_method") or "")
+    if method == "api_chronology":
+        return "high", None
+
+    track_id = str(row.get("spotify_track_id") or "")
+    if track_id:
+        return "low", "fallback_likely_complete"
+    return "low", "fallback_likely_complete"
+
+
+def _annotate_recent_fallback_sequences(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    chronological = sorted(
+        rows,
+        key=lambda row: (
+            datetime.fromisoformat(str(row["played_at"]).replace("Z", "+00:00")),
+            str(row["source_row_key"]),
+        ),
+    )
+    previous_played_at: datetime | None = None
+    for row in chronological:
+        confidence, fallback_class = _estimate_recent_fallback_metadata(row)
+        row["ms_played_confidence"] = confidence
+        row["ms_played_fallback_class"] = fallback_class
+
+        track_duration_ms = row.get("track_duration_ms")
+        played_at = datetime.fromisoformat(str(row["played_at"]).replace("Z", "+00:00"))
+        if (
+            str(row.get("ms_played_method")) != "api_chronology"
+            and track_duration_ms is not None
+            and previous_played_at is not None
+            and int(track_duration_ms) > 0
+            and int((played_at - previous_played_at).total_seconds() * 1000) > (2 * int(track_duration_ms))
+        ):
+            # Assumption: rows with a very large prior gap relative to track
+            # duration are more likely short transition/skip-like plays.
+            row["ms_played_fallback_class"] = "fallback_short_transition"
+        previous_played_at = played_at
+    return rows
 
 
 def _log_sync_started(
@@ -161,6 +208,7 @@ def ingest_spotify_recent_rows(
     rows: list[dict[str, Any]],
     source_ref: str | None = None,
 ) -> dict[str, Any]:
+    total_started = perf_counter()
     start_info = start_spotify_recent_sync_run(source_ref=source_ref)
     run_id = str(start_info["run_id"])
     started_at = str(start_info["started_at"])
@@ -174,12 +222,20 @@ def ingest_spotify_recent_rows(
     max_played_at: str | None = None
     min_played_at: str | None = None
 
+    canonical_projection_summary: dict[str, Any] | None = None
+    raw_inserts_elapsed_ms = 0.0
+    final_commit_elapsed_ms = 0.0
+    matcher_elapsed_ms = 0.0
+    projector_elapsed_ms = 0.0
+    last_heartbeat_touch = perf_counter()
     try:
+        _annotate_recent_fallback_sequences(rows)
         for row in rows:
             row_count += 1
             source_row_key = str(row["source_row_key"])
             played_at = str(row["played_at"])
 
+            raw_insert_started = perf_counter()
             row_result = insert_or_upgrade_raw_play_event(
                 ingest_run_id=run_id,
                 source_type="spotify_recent",
@@ -206,6 +262,28 @@ def ingest_spotify_recent_rows(
                 spotify_artist_ids_json=row.get("spotify_artist_ids_json"),
                 raw_payload_json=str(row["raw_payload_json"]),
             )
+            insert_raw_spotify_recent_observation(
+                ingest_run_id=run_id,
+                source_row_key=source_row_key,
+                source_event_id=row.get("source_event_id"),
+                played_at=played_at,
+                ms_played_estimate=int(row["ms_played"]),
+                ms_played_method=str(row["ms_played_method"]),
+                ms_played_confidence=str(row.get("ms_played_confidence") or "low"),
+                ms_played_fallback_class=row.get("ms_played_fallback_class"),
+                spotify_track_uri=row.get("spotify_track_uri"),
+                spotify_track_id=row.get("spotify_track_id"),
+                track_name_raw=row.get("track_name_raw"),
+                artist_name_raw=row.get("artist_name_raw"),
+                album_name_raw=row.get("album_name_raw"),
+                spotify_album_id=row.get("spotify_album_id"),
+                spotify_artist_ids_json=row.get("spotify_artist_ids_json"),
+                track_duration_ms=row.get("track_duration_ms"),
+                context_type=row.get("context_type"),
+                context_uri=row.get("context_uri"),
+                raw_payload_json=str(row["raw_payload_json"]),
+            )
+            raw_inserts_elapsed_ms += (perf_counter() - raw_insert_started) * 1000
 
             action = str(row_result["action"])
             raw_play_event_id = int(row_result["row_id"])
@@ -258,7 +336,16 @@ def ingest_spotify_recent_rows(
                 if candidate < current_min:
                     min_played_at = played_at
 
+            current_tick = perf_counter()
+            if (current_tick - last_heartbeat_touch) >= HEARTBEAT_INTERVAL_SECONDS:
+                patch_ingest_run_heartbeat(
+                    run_id=run_id,
+                    heartbeat_at=_utc_now_iso(),
+                )
+                last_heartbeat_touch = current_tick
+
         completed_at = _utc_now_iso()
+        complete_started = perf_counter()
         complete_spotify_recent_sync_run(
             run_id=run_id,
             completed_at=completed_at,
@@ -267,6 +354,26 @@ def ingest_spotify_recent_rows(
             inserted_count=inserted_count,
             duplicate_count=duplicate_count,
             error_count=0,
+        )
+        final_commit_elapsed_ms = (perf_counter() - complete_started) * 1000
+        projector_started = perf_counter()
+        canonical_projection_summary = reconcile_fact_play_events_for_ingest_run(
+            source_type="spotify_recent",
+            run_id=run_id,
+        )
+        projector_elapsed_ms = (perf_counter() - projector_started) * 1000
+        matcher_elapsed_ms = float(canonical_projection_summary.get("matcher_ms", 0.0))
+        projector_elapsed_ms = float(canonical_projection_summary.get("projector_ms", projector_elapsed_ms))
+
+        patch_ingest_run_timing_phases(
+            run_id=run_id,
+            timing_phases_ms={
+                "raw_inserts_ms": raw_inserts_elapsed_ms,
+                "matcher_ms": matcher_elapsed_ms,
+                "projector_ms": projector_elapsed_ms,
+                "final_commit_ms": final_commit_elapsed_ms,
+                "total_duration_ms": (perf_counter() - total_started) * 1000,
+            },
         )
     except Exception:
         _log_sync_failed(
@@ -291,6 +398,7 @@ def ingest_spotify_recent_rows(
         "earliest_played_at": min_played_at,
         "latest_played_at": max_played_at,
         "last_successful_played_at": max_played_at,
+        "canonical_projection_summary": canonical_projection_summary,
     }
 
 

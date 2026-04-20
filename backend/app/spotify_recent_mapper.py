@@ -59,12 +59,13 @@ def _cross_source_event_key(item: dict[str, Any], track: dict[str, Any]) -> str 
 def map_spotify_recent_play_item(item: dict[str, Any]) -> dict[str, Any]:
     track = item.get("track") or {}
     album = track.get("album") or {}
+    context = item.get("context") or {}
     artist_names = _artist_names(track)
     track_duration_ms_raw = track.get("duration_ms")
     if track_duration_ms_raw is None:
         raise ValueError("Spotify recent-play item is missing track.duration_ms")
     track_duration_ms = int(track_duration_ms_raw)
-    ms_played = int(track_duration_ms * 0.65)
+    ms_played = int(track_duration_ms)
     played_at = _canonical_played_at(item.get("played_at"))
 
     return {
@@ -84,6 +85,8 @@ def map_spotify_recent_play_item(item: dict[str, Any]) -> dict[str, Any]:
         "spotify_track_id": track.get("id"),
         "spotify_album_id": album.get("id"),
         "spotify_artist_ids_json": _artist_ids_json(track),
+        "context_type": context.get("type"),
+        "context_uri": context.get("uri"),
         "skipped": None,
         "platform": None,
         "shuffle": None,

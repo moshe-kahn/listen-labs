@@ -719,6 +719,314 @@ CREATE TABLE release_track_merge_log (
 CREATE INDEX idx_release_track_merge_log_canonical_release_track_id
   ON release_track_merge_log(canonical_release_track_id);
 """,
+    14: """
+CREATE TABLE raw_spotify_recent (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ingest_run_id TEXT REFERENCES ingest_run(id),
+  source_row_key TEXT NOT NULL UNIQUE,
+  source_event_id TEXT,
+  played_at TEXT NOT NULL,
+  played_at_unix_ms INTEGER,
+  spotify_track_id TEXT,
+  spotify_track_uri TEXT,
+  spotify_album_id TEXT,
+  spotify_artist_ids_json TEXT,
+  track_name_raw TEXT,
+  artist_name_raw TEXT,
+  album_name_raw TEXT,
+  track_duration_ms INTEGER,
+  ms_played_estimate INTEGER NOT NULL,
+  ms_played_method TEXT NOT NULL,
+  ms_played_confidence TEXT NOT NULL,
+  ms_played_fallback_class TEXT,
+  context_type TEXT,
+  context_uri TEXT,
+  raw_payload_json TEXT NOT NULL,
+  inserted_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+CREATE TABLE raw_spotify_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ingest_run_id TEXT REFERENCES ingest_run(id),
+  source_row_key TEXT NOT NULL UNIQUE,
+  played_at TEXT NOT NULL,
+  played_at_unix_ms INTEGER,
+  spotify_track_id TEXT,
+  spotify_track_uri TEXT,
+  spotify_album_id TEXT,
+  spotify_artist_ids_json TEXT,
+  track_name_raw TEXT,
+  artist_name_raw TEXT,
+  album_name_raw TEXT,
+  ms_played INTEGER NOT NULL,
+  reason_start TEXT,
+  reason_end TEXT,
+  skipped INTEGER,
+  shuffle INTEGER,
+  offline INTEGER,
+  platform TEXT,
+  conn_country TEXT,
+  private_session INTEGER,
+  raw_payload_json TEXT NOT NULL,
+  inserted_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+CREATE TABLE fact_play_event (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  canonical_started_at TEXT,
+  canonical_ended_at TEXT NOT NULL,
+  canonical_ms_played INTEGER,
+  ms_played_confidence TEXT,
+  canonical_reason_start TEXT,
+  canonical_reason_end TEXT,
+  canonical_skipped INTEGER,
+  canonical_shuffle INTEGER,
+  canonical_offline INTEGER,
+  canonical_private_session INTEGER,
+  canonical_context_type TEXT,
+  canonical_context_uri TEXT,
+  spotify_track_id TEXT,
+  spotify_track_uri TEXT,
+  spotify_album_id TEXT,
+  spotify_artist_ids_json TEXT,
+  track_name_canonical TEXT,
+  artist_name_canonical TEXT,
+  album_name_canonical TEXT,
+  timing_source TEXT NOT NULL,
+  matched_state TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+CREATE TABLE fact_play_event_recent_link (
+  fact_play_event_id INTEGER NOT NULL REFERENCES fact_play_event(id),
+  raw_spotify_recent_id INTEGER NOT NULL UNIQUE REFERENCES raw_spotify_recent(id),
+  match_delta_ms INTEGER,
+  match_tier TEXT,
+  is_primary INTEGER NOT NULL DEFAULT 1,
+  UNIQUE(fact_play_event_id, raw_spotify_recent_id)
+);
+
+CREATE TABLE fact_play_event_history_link (
+  fact_play_event_id INTEGER NOT NULL REFERENCES fact_play_event(id),
+  raw_spotify_history_id INTEGER NOT NULL UNIQUE REFERENCES raw_spotify_history(id),
+  match_delta_ms INTEGER,
+  match_tier TEXT,
+  is_primary INTEGER NOT NULL DEFAULT 1,
+  UNIQUE(fact_play_event_id, raw_spotify_history_id)
+);
+
+CREATE INDEX idx_raw_spotify_recent_played_at
+  ON raw_spotify_recent(played_at);
+CREATE INDEX idx_raw_spotify_recent_track_id_played_at
+  ON raw_spotify_recent(spotify_track_id, played_at);
+CREATE INDEX idx_raw_spotify_recent_track_uri_played_at
+  ON raw_spotify_recent(spotify_track_uri, played_at);
+
+CREATE INDEX idx_raw_spotify_history_played_at
+  ON raw_spotify_history(played_at);
+CREATE INDEX idx_raw_spotify_history_track_id_played_at
+  ON raw_spotify_history(spotify_track_id, played_at);
+CREATE INDEX idx_raw_spotify_history_track_uri_played_at
+  ON raw_spotify_history(spotify_track_uri, played_at);
+
+CREATE INDEX idx_fact_play_event_recent_link_fact
+  ON fact_play_event_recent_link(fact_play_event_id);
+CREATE INDEX idx_fact_play_event_history_link_fact
+  ON fact_play_event_history_link(fact_play_event_id);
+
+INSERT OR IGNORE INTO raw_spotify_recent (
+  ingest_run_id,
+  source_row_key,
+  source_event_id,
+  played_at,
+  played_at_unix_ms,
+  spotify_track_id,
+  spotify_track_uri,
+  spotify_album_id,
+  spotify_artist_ids_json,
+  track_name_raw,
+  artist_name_raw,
+  album_name_raw,
+  track_duration_ms,
+  ms_played_estimate,
+  ms_played_method,
+  ms_played_confidence,
+  ms_played_fallback_class,
+  context_type,
+  context_uri,
+  raw_payload_json,
+  inserted_at
+)
+SELECT
+  ingest_run_id,
+  source_row_key,
+  source_event_id,
+  played_at,
+  CAST(strftime('%s', replace(played_at, 'Z', '')) AS INTEGER) * 1000,
+  spotify_track_id,
+  spotify_track_uri,
+  spotify_album_id,
+  spotify_artist_ids_json,
+  track_name_raw,
+  artist_name_raw,
+  album_name_raw,
+  track_duration_ms,
+  ms_played,
+  ms_played_method,
+  CASE
+    WHEN ms_played_method = 'api_chronology' THEN 'high'
+    ELSE 'low'
+  END,
+  CASE
+    WHEN ms_played_method = 'api_chronology' THEN NULL
+    ELSE 'fallback_likely_complete'
+  END,
+  NULL,
+  NULL,
+  raw_payload_json,
+  inserted_at
+FROM raw_play_event
+WHERE source_type = 'spotify_recent';
+
+INSERT OR IGNORE INTO raw_spotify_history (
+  ingest_run_id,
+  source_row_key,
+  played_at,
+  played_at_unix_ms,
+  spotify_track_id,
+  spotify_track_uri,
+  spotify_album_id,
+  spotify_artist_ids_json,
+  track_name_raw,
+  artist_name_raw,
+  album_name_raw,
+  ms_played,
+  reason_start,
+  reason_end,
+  skipped,
+  shuffle,
+  offline,
+  platform,
+  conn_country,
+  private_session,
+  raw_payload_json,
+  inserted_at
+)
+SELECT
+  ingest_run_id,
+  source_row_key,
+  played_at,
+  CAST(strftime('%s', replace(played_at, 'Z', '')) AS INTEGER) * 1000,
+  spotify_track_id,
+  spotify_track_uri,
+  spotify_album_id,
+  spotify_artist_ids_json,
+  track_name_raw,
+  artist_name_raw,
+  album_name_raw,
+  ms_played,
+  reason_start,
+  reason_end,
+  skipped,
+  shuffle,
+  offline,
+  platform,
+  conn_country,
+  NULL,
+  raw_payload_json,
+  inserted_at
+FROM raw_play_event
+WHERE source_type = 'export';
+
+CREATE VIEW v_raw_spotify_observation AS
+SELECT
+  'spotify_recent' AS source_type,
+  id AS raw_id,
+  ingest_run_id,
+  source_row_key,
+  played_at,
+  spotify_track_id,
+  spotify_track_uri,
+  spotify_album_id,
+  spotify_artist_ids_json,
+  track_name_raw,
+  artist_name_raw,
+  album_name_raw,
+  ms_played_estimate AS ms_played,
+  ms_played_method,
+  ms_played_confidence,
+  ms_played_fallback_class,
+  NULL AS reason_start,
+  NULL AS reason_end,
+  NULL AS skipped,
+  NULL AS shuffle,
+  NULL AS offline,
+  NULL AS platform,
+  NULL AS conn_country,
+  NULL AS private_session
+FROM raw_spotify_recent
+UNION ALL
+SELECT
+  'spotify_history' AS source_type,
+  id AS raw_id,
+  ingest_run_id,
+  source_row_key,
+  played_at,
+  spotify_track_id,
+  spotify_track_uri,
+  spotify_album_id,
+  spotify_artist_ids_json,
+  track_name_raw,
+  artist_name_raw,
+  album_name_raw,
+  ms_played AS ms_played,
+  'history_source' AS ms_played_method,
+  'high' AS ms_played_confidence,
+  NULL AS ms_played_fallback_class,
+  reason_start,
+  reason_end,
+  skipped,
+  shuffle,
+  offline,
+  platform,
+  conn_country,
+  private_session
+FROM raw_spotify_history;
+
+CREATE VIEW v_fact_play_event_with_sources AS
+SELECT
+  f.*,
+  fr.raw_spotify_recent_id,
+  fh.raw_spotify_history_id,
+  fr.match_delta_ms AS recent_match_delta_ms,
+  fr.match_tier AS recent_match_tier,
+  fh.match_delta_ms AS history_match_delta_ms,
+  fh.match_tier AS history_match_tier
+FROM fact_play_event f
+LEFT JOIN fact_play_event_recent_link fr
+  ON fr.fact_play_event_id = f.id
+LEFT JOIN fact_play_event_history_link fh
+  ON fh.fact_play_event_id = f.id;
+""",
+    15: """
+CREATE INDEX IF NOT EXISTS idx_raw_play_event_cross_source_event_key
+  ON raw_play_event(cross_source_event_key)
+  WHERE cross_source_event_key IS NOT NULL;
+""",
+    16: """
+ALTER TABLE ingest_run ADD COLUMN last_heartbeat_at TEXT;
+ALTER TABLE ingest_run ADD COLUMN file_discovery_ms REAL;
+ALTER TABLE ingest_run ADD COLUMN file_read_ms REAL;
+ALTER TABLE ingest_run ADD COLUMN file_parse_ms REAL;
+ALTER TABLE ingest_run ADD COLUMN mapping_ms REAL;
+ALTER TABLE ingest_run ADD COLUMN raw_inserts_ms REAL;
+ALTER TABLE ingest_run ADD COLUMN matcher_ms REAL;
+ALTER TABLE ingest_run ADD COLUMN projector_ms REAL;
+ALTER TABLE ingest_run ADD COLUMN downstream_pipeline_ms REAL;
+ALTER TABLE ingest_run ADD COLUMN final_commit_ms REAL;
+ALTER TABLE ingest_run ADD COLUMN total_duration_ms REAL;
+""",
 }
 
 
@@ -962,6 +1270,288 @@ def insert_raw_play_event_if_new(
                 source_type=source_type,
             )
     return row_id
+
+
+def _to_unix_ms(timestamp_value: str | None) -> int | None:
+    if timestamp_value is None:
+        return None
+    parsed = datetime.fromisoformat(str(timestamp_value).replace("Z", "+00:00"))
+    return int(parsed.timestamp() * 1000)
+
+
+def _insert_raw_spotify_recent_observation_with_connection(
+    connection: sqlite3.Connection,
+    *,
+    ingest_run_id: str | None,
+    source_row_key: str,
+    played_at: str,
+    ms_played_estimate: int,
+    ms_played_method: str,
+    ms_played_confidence: str,
+    raw_payload_json: str,
+    source_event_id: str | None = None,
+    spotify_track_id: str | None = None,
+    spotify_track_uri: str | None = None,
+    spotify_album_id: str | None = None,
+    spotify_artist_ids_json: str | None = None,
+    track_name_raw: str | None = None,
+    artist_name_raw: str | None = None,
+    album_name_raw: str | None = None,
+    track_duration_ms: int | None = None,
+    ms_played_fallback_class: str | None = None,
+    context_type: str | None = None,
+    context_uri: str | None = None,
+) -> dict[str, Any]:
+    connection.row_factory = sqlite3.Row
+    existing = connection.execute(
+        """
+        SELECT id
+        FROM raw_spotify_recent
+        WHERE source_row_key = ?
+        LIMIT 1
+        """,
+        (source_row_key,),
+    ).fetchone()
+    if existing is not None:
+        return {"row_id": int(existing["id"]), "action": "unchanged"}
+
+    cursor = connection.execute(
+        """
+        INSERT INTO raw_spotify_recent (
+          ingest_run_id,
+          source_row_key,
+          source_event_id,
+          played_at,
+          played_at_unix_ms,
+          spotify_track_id,
+          spotify_track_uri,
+          spotify_album_id,
+          spotify_artist_ids_json,
+          track_name_raw,
+          artist_name_raw,
+          album_name_raw,
+          track_duration_ms,
+          ms_played_estimate,
+          ms_played_method,
+          ms_played_confidence,
+          ms_played_fallback_class,
+          context_type,
+          context_uri,
+          raw_payload_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            ingest_run_id,
+            source_row_key,
+            source_event_id,
+            played_at,
+            _to_unix_ms(played_at),
+            spotify_track_id,
+            spotify_track_uri,
+            spotify_album_id,
+            spotify_artist_ids_json,
+            track_name_raw,
+            artist_name_raw,
+            album_name_raw,
+            track_duration_ms,
+            ms_played_estimate,
+            ms_played_method,
+            ms_played_confidence,
+            ms_played_fallback_class,
+            context_type,
+            context_uri,
+            raw_payload_json,
+        ),
+    )
+    return {"row_id": int(cursor.lastrowid), "action": "inserted"}
+
+
+def insert_raw_spotify_recent_observation(
+    *,
+    ingest_run_id: str | None,
+    source_row_key: str,
+    played_at: str,
+    ms_played_estimate: int,
+    ms_played_method: str,
+    ms_played_confidence: str,
+    raw_payload_json: str,
+    source_event_id: str | None = None,
+    spotify_track_id: str | None = None,
+    spotify_track_uri: str | None = None,
+    spotify_album_id: str | None = None,
+    spotify_artist_ids_json: str | None = None,
+    track_name_raw: str | None = None,
+    artist_name_raw: str | None = None,
+    album_name_raw: str | None = None,
+    track_duration_ms: int | None = None,
+    ms_played_fallback_class: str | None = None,
+    context_type: str | None = None,
+    context_uri: str | None = None,
+) -> dict[str, Any]:
+    with sqlite_connection(write=True) as connection:
+        return _insert_raw_spotify_recent_observation_with_connection(
+            connection,
+            ingest_run_id=ingest_run_id,
+            source_row_key=source_row_key,
+            played_at=played_at,
+            ms_played_estimate=ms_played_estimate,
+            ms_played_method=ms_played_method,
+            ms_played_confidence=ms_played_confidence,
+            raw_payload_json=raw_payload_json,
+            source_event_id=source_event_id,
+            spotify_track_id=spotify_track_id,
+            spotify_track_uri=spotify_track_uri,
+            spotify_album_id=spotify_album_id,
+            spotify_artist_ids_json=spotify_artist_ids_json,
+            track_name_raw=track_name_raw,
+            artist_name_raw=artist_name_raw,
+            album_name_raw=album_name_raw,
+            track_duration_ms=track_duration_ms,
+            ms_played_fallback_class=ms_played_fallback_class,
+            context_type=context_type,
+            context_uri=context_uri,
+        )
+
+
+def _insert_raw_spotify_history_observation_with_connection(
+    connection: sqlite3.Connection,
+    *,
+    ingest_run_id: str | None,
+    source_row_key: str,
+    played_at: str,
+    ms_played: int,
+    raw_payload_json: str,
+    spotify_track_id: str | None = None,
+    spotify_track_uri: str | None = None,
+    spotify_album_id: str | None = None,
+    spotify_artist_ids_json: str | None = None,
+    track_name_raw: str | None = None,
+    artist_name_raw: str | None = None,
+    album_name_raw: str | None = None,
+    reason_start: str | None = None,
+    reason_end: str | None = None,
+    skipped: int | None = None,
+    shuffle: int | None = None,
+    offline: int | None = None,
+    platform: str | None = None,
+    conn_country: str | None = None,
+    private_session: int | None = None,
+) -> dict[str, Any]:
+    connection.row_factory = sqlite3.Row
+    existing = connection.execute(
+        """
+        SELECT id
+        FROM raw_spotify_history
+        WHERE source_row_key = ?
+        LIMIT 1
+        """,
+        (source_row_key,),
+    ).fetchone()
+    if existing is not None:
+        return {"row_id": int(existing["id"]), "action": "unchanged"}
+
+    cursor = connection.execute(
+        """
+        INSERT INTO raw_spotify_history (
+          ingest_run_id,
+          source_row_key,
+          played_at,
+          played_at_unix_ms,
+          spotify_track_id,
+          spotify_track_uri,
+          spotify_album_id,
+          spotify_artist_ids_json,
+          track_name_raw,
+          artist_name_raw,
+          album_name_raw,
+          ms_played,
+          reason_start,
+          reason_end,
+          skipped,
+          shuffle,
+          offline,
+          platform,
+          conn_country,
+          private_session,
+          raw_payload_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            ingest_run_id,
+            source_row_key,
+            played_at,
+            _to_unix_ms(played_at),
+            spotify_track_id,
+            spotify_track_uri,
+            spotify_album_id,
+            spotify_artist_ids_json,
+            track_name_raw,
+            artist_name_raw,
+            album_name_raw,
+            ms_played,
+            reason_start,
+            reason_end,
+            skipped,
+            shuffle,
+            offline,
+            platform,
+            conn_country,
+            private_session,
+            raw_payload_json,
+        ),
+    )
+    return {"row_id": int(cursor.lastrowid), "action": "inserted"}
+
+
+def insert_raw_spotify_history_observation(
+    *,
+    ingest_run_id: str | None,
+    source_row_key: str,
+    played_at: str,
+    ms_played: int,
+    raw_payload_json: str,
+    spotify_track_id: str | None = None,
+    spotify_track_uri: str | None = None,
+    spotify_album_id: str | None = None,
+    spotify_artist_ids_json: str | None = None,
+    track_name_raw: str | None = None,
+    artist_name_raw: str | None = None,
+    album_name_raw: str | None = None,
+    reason_start: str | None = None,
+    reason_end: str | None = None,
+    skipped: int | None = None,
+    shuffle: int | None = None,
+    offline: int | None = None,
+    platform: str | None = None,
+    conn_country: str | None = None,
+    private_session: int | None = None,
+) -> dict[str, Any]:
+    with sqlite_connection(write=True) as connection:
+        return _insert_raw_spotify_history_observation_with_connection(
+            connection,
+            ingest_run_id=ingest_run_id,
+            source_row_key=source_row_key,
+            played_at=played_at,
+            ms_played=ms_played,
+            raw_payload_json=raw_payload_json,
+            spotify_track_id=spotify_track_id,
+            spotify_track_uri=spotify_track_uri,
+            spotify_album_id=spotify_album_id,
+            spotify_artist_ids_json=spotify_artist_ids_json,
+            track_name_raw=track_name_raw,
+            artist_name_raw=artist_name_raw,
+            album_name_raw=album_name_raw,
+            reason_start=reason_start,
+            reason_end=reason_end,
+            skipped=skipped,
+            shuffle=shuffle,
+            offline=offline,
+            platform=platform,
+            conn_country=conn_country,
+            private_session=private_session,
+        )
 
 
 def _ms_played_method_rank(method: str | None) -> int:
@@ -1309,18 +1899,58 @@ def get_raw_play_event_by_source_row_key(source_row_key: str) -> dict[str, Any] 
     return dict(row) if row is not None else None
 
 
-def list_raw_play_events(limit: int = 50) -> list[dict[str, Any]]:
+def list_canonical_play_events(limit: int = 50) -> list[dict[str, Any]]:
     with sqlite_connection(row_factory=sqlite3.Row) as connection:
         rows = connection.execute(
             """
-            SELECT *
-            FROM raw_play_event
-            ORDER BY played_at DESC
+            SELECT
+              id,
+              NULL AS ingest_run_id,
+              CASE
+                WHEN raw_spotify_recent_id IS NOT NULL AND raw_spotify_history_id IS NOT NULL THEN 'canonical_matched'
+                WHEN raw_spotify_history_id IS NOT NULL THEN 'spotify_history'
+                WHEN raw_spotify_recent_id IS NOT NULL THEN 'spotify_recent'
+                ELSE 'canonical'
+              END AS source_type,
+              NULL AS source_event_id,
+              NULL AS source_row_key,
+              NULL AS cross_source_event_key,
+              canonical_ended_at AS played_at,
+              canonical_ms_played AS ms_played,
+              timing_source AS ms_played_method,
+              NULL AS track_duration_ms,
+              canonical_reason_start AS reason_start,
+              canonical_reason_end AS reason_end,
+              canonical_skipped AS skipped,
+              canonical_shuffle AS shuffle,
+              canonical_offline AS offline,
+              NULL AS platform,
+              NULL AS conn_country,
+              spotify_track_uri,
+              spotify_track_id,
+              track_name_canonical AS track_name_raw,
+              artist_name_canonical AS artist_name_raw,
+              album_name_canonical AS album_name_raw,
+              spotify_album_id,
+              spotify_artist_ids_json,
+              NULL AS raw_payload_json,
+              created_at AS inserted_at,
+              raw_spotify_recent_id,
+              raw_spotify_history_id
+            FROM v_fact_play_event_with_sources
+            WHERE canonical_ended_at IS NOT NULL
+            ORDER BY canonical_ended_at DESC, id DESC
             LIMIT ?
             """,
             (limit,),
         ).fetchall()
         return [dict(row) for row in rows]
+
+
+def list_raw_play_events(limit: int = 50) -> list[dict[str, Any]]:
+    # Compatibility wrapper: this now returns canonicalized play events.
+    # Prefer list_canonical_play_events() for new callers.
+    return list_canonical_play_events(limit=limit)
 
 
 def list_unified_top_tracks(
@@ -1343,15 +1973,16 @@ def list_unified_top_tracks(
             WITH normalized AS (
               SELECT
                 id,
-                played_at,
+                canonical_ended_at AS played_at,
                 CASE
                   WHEN spotify_track_id IS NOT NULL AND spotify_track_id != '' THEN spotify_track_id
                   WHEN spotify_track_uri IS NOT NULL AND spotify_track_uri != '' THEN spotify_track_uri
-                  ELSE '__unknown__:' || LOWER(TRIM(COALESCE(track_name_raw, ''))) || ':' || LOWER(TRIM(COALESCE(artist_name_raw, '')))
+                  ELSE '__unknown__:' || LOWER(TRIM(COALESCE(track_name_canonical, ''))) || ':' || LOWER(TRIM(COALESCE(artist_name_canonical, '')))
                 END AS track_id,
-                track_name_raw,
-                artist_name_raw
-              FROM raw_play_event
+                track_name_canonical AS track_name_raw,
+                artist_name_canonical AS artist_name_raw
+              FROM v_fact_play_event_with_sources
+              WHERE canonical_ended_at IS NOT NULL
             ),
             agg AS (
               SELECT
@@ -1449,6 +2080,52 @@ def insert_ingest_run(
     return run_id
 
 
+def recover_stale_ingest_runs(*, stale_after_minutes: int = 60) -> dict[str, Any]:
+    stale_after_minutes = max(1, int(stale_after_minutes))
+    cutoff_dt = (datetime.now(UTC) - timedelta(minutes=stale_after_minutes)).isoformat().replace("+00:00", "Z")
+    recovered_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+    with sqlite_connection(write=True, row_factory=sqlite3.Row) as connection:
+        stale_rows = connection.execute(
+            """
+            SELECT id
+            FROM ingest_run
+            WHERE status = 'running'
+              AND completed_at IS NULL
+              AND COALESCE(last_heartbeat_at, started_at) <= ?
+            ORDER BY started_at ASC
+            """,
+            (cutoff_dt,),
+        ).fetchall()
+
+        stale_ids = [str(row["id"]) for row in stale_rows]
+        if stale_ids:
+            placeholders = ",".join("?" for _ in stale_ids)
+            connection.execute(
+                f"""
+                UPDATE ingest_run
+                SET
+                  status = 'failed',
+                  completed_at = ?,
+                  error_count = CASE
+                    WHEN error_count <= 0 THEN 1
+                    ELSE error_count
+                  END,
+                  last_heartbeat_at = COALESCE(last_heartbeat_at, started_at)
+                WHERE id IN ({placeholders})
+                """,
+                (recovered_at, *stale_ids),
+            )
+
+    return {
+        "stale_after_minutes": stale_after_minutes,
+        "cutoff_last_heartbeat_at": cutoff_dt,
+        "recovered_at": recovered_at,
+        "recovered_count": len(stale_ids),
+        "recovered_run_ids": stale_ids,
+    }
+
+
 def _insert_ingest_run_with_connection(
     connection: sqlite3.Connection,
     *,
@@ -1465,13 +2142,74 @@ def _insert_ingest_run_with_connection(
           source_type,
           source_ref,
           started_at,
-          status
+          status,
+          last_heartbeat_at
         )
-        VALUES (?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (run_id, source_type, source_ref, started_at, status),
+        (run_id, source_type, source_ref, started_at, status, started_at),
     )
     return run_id
+
+
+def patch_ingest_run_heartbeat(
+    *,
+    run_id: str,
+    heartbeat_at: str,
+) -> None:
+    with sqlite_connection(write=True) as connection:
+        cursor = connection.execute(
+            """
+            UPDATE ingest_run
+            SET last_heartbeat_at = ?
+            WHERE id = ?
+              AND status = 'running'
+            """,
+            (heartbeat_at, run_id),
+        )
+        if cursor.rowcount not in (0, 1):
+            raise RuntimeError(f"unexpected ingest_run update count for id={run_id}: {cursor.rowcount}")
+
+
+def patch_ingest_run_timing_phases(
+    *,
+    run_id: str,
+    timing_phases_ms: dict[str, float] | None,
+) -> None:
+    phases = dict(timing_phases_ms or {})
+    with sqlite_connection(write=True) as connection:
+        cursor = connection.execute(
+            """
+            UPDATE ingest_run
+            SET
+              file_discovery_ms = ?,
+              file_read_ms = ?,
+              file_parse_ms = ?,
+              mapping_ms = ?,
+              raw_inserts_ms = ?,
+              matcher_ms = ?,
+              projector_ms = ?,
+              downstream_pipeline_ms = ?,
+              final_commit_ms = ?,
+              total_duration_ms = ?
+            WHERE id = ?
+            """,
+            (
+                phases.get("file_discovery_ms"),
+                phases.get("file_read_ms"),
+                phases.get("file_parse_ms"),
+                phases.get("mapping_ms"),
+                phases.get("raw_inserts_ms"),
+                phases.get("matcher_ms"),
+                phases.get("projector_ms"),
+                phases.get("downstream_pipeline_ms"),
+                phases.get("final_commit_ms"),
+                phases.get("total_duration_ms"),
+                run_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError(f"ingest_run not found for id={run_id}")
 
 
 def _complete_ingest_run_with_connection(
@@ -1490,6 +2228,7 @@ def _complete_ingest_run_with_connection(
         UPDATE ingest_run
         SET
           completed_at = ?,
+          last_heartbeat_at = ?,
           row_count = ?,
           inserted_count = ?,
           duplicate_count = ?,
@@ -1498,6 +2237,7 @@ def _complete_ingest_run_with_connection(
         WHERE id = ?
         """,
         (
+            completed_at,
             completed_at,
             row_count,
             inserted_count,
@@ -1550,6 +2290,7 @@ def complete_ingest_run_and_patch_spotify_sync_state(
             UPDATE ingest_run
             SET
               completed_at = ?,
+              last_heartbeat_at = ?,
               row_count = ?,
               inserted_count = ?,
               duplicate_count = ?,
@@ -1558,6 +2299,7 @@ def complete_ingest_run_and_patch_spotify_sync_state(
             WHERE id = ?
             """,
             (
+                completed_at,
                 completed_at,
                 row_count,
                 inserted_count,
@@ -1642,11 +2384,22 @@ def get_ingest_run(run_id: str) -> dict[str, Any] | None:
               source_ref,
               started_at,
               completed_at,
+              last_heartbeat_at,
               status,
               row_count,
               inserted_count,
               duplicate_count,
               error_count,
+              file_discovery_ms,
+              file_read_ms,
+              file_parse_ms,
+              mapping_ms,
+              raw_inserts_ms,
+              matcher_ms,
+              projector_ms,
+              downstream_pipeline_ms,
+              final_commit_ms,
+              total_duration_ms,
               created_at
             FROM ingest_run
             WHERE id = ?
@@ -1687,11 +2440,22 @@ def list_ingest_runs(
               source_ref,
               started_at,
               completed_at,
+              last_heartbeat_at,
               status,
               row_count,
               inserted_count,
               duplicate_count,
               error_count,
+              file_discovery_ms,
+              file_read_ms,
+              file_parse_ms,
+              mapping_ms,
+              raw_inserts_ms,
+              matcher_ms,
+              projector_ms,
+              downstream_pipeline_ms,
+              final_commit_ms,
+              total_duration_ms,
               created_at
             FROM ingest_run
             {where_sql}
@@ -3444,6 +4208,96 @@ def refresh_conservative_analysis_track_links() -> dict[str, int]:
     counts["groups_suggested"] = suggestion_counts["groups_suggested"]
     counts["analysis_tracks_created"] = suggestion_counts["analysis_tracks_created"]
     counts["analysis_track_maps_created"] = suggestion_counts["analysis_track_maps_created"]
+    return counts
+
+
+def refresh_conservative_track_relationships() -> dict[str, int]:
+    counts = {
+        "groups_considered": 0,
+        "relationships_deleted": 0,
+        "relationships_created": 0,
+    }
+
+    with sqlite_connection(write=True, row_factory=sqlite3.Row) as connection:
+        relationships_deleted = connection.execute(
+            """
+            DELETE FROM track_relationship
+            WHERE relationship_type = 'same_composition'
+              AND match_method = 'analysis_track_group'
+              AND is_user_confirmed = 0
+            """
+        ).rowcount
+        counts["relationships_deleted"] = int(relationships_deleted)
+
+        grouped_rows = connection.execute(
+            """
+            SELECT
+              analysis_track_id,
+              release_track_id,
+              confidence,
+              status
+            FROM analysis_track_map
+            ORDER BY analysis_track_id ASC, release_track_id ASC
+            """
+        ).fetchall()
+
+        groups: dict[int, list[sqlite3.Row]] = {}
+        for row in grouped_rows:
+            groups.setdefault(int(row["analysis_track_id"]), []).append(row)
+
+        now_iso = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        for analysis_track_id, rows in groups.items():
+            if len(rows) < 2:
+                continue
+            counts["groups_considered"] += 1
+
+            release_rows = sorted(rows, key=lambda r: int(r["release_track_id"]))
+            for i in range(len(release_rows)):
+                for j in range(i + 1, len(release_rows)):
+                    left = release_rows[i]
+                    right = release_rows[j]
+                    from_release_track_id = int(left["release_track_id"])
+                    to_release_track_id = int(right["release_track_id"])
+                    confidence = min(float(left["confidence"]), float(right["confidence"]))
+                    status = (
+                        "accepted"
+                        if str(left["status"]) == "accepted" and str(right["status"]) == "accepted"
+                        else "suggested"
+                    )
+                    explanation = (
+                        "Suggested from shared analysis_track grouping; "
+                        "release tracks mapped to the same conservative analysis composition cluster"
+                    )
+
+                    cursor = connection.execute(
+                        """
+                        INSERT OR IGNORE INTO track_relationship (
+                          from_release_track_id,
+                          to_release_track_id,
+                          relationship_type,
+                          match_method,
+                          confidence,
+                          status,
+                          is_user_confirmed,
+                          explanation,
+                          created_at,
+                          updated_at
+                        )
+                        VALUES (?, ?, 'same_composition', 'analysis_track_group', ?, ?, 0, ?, ?, ?)
+                        """,
+                        (
+                            from_release_track_id,
+                            to_release_track_id,
+                            confidence,
+                            status,
+                            explanation,
+                            now_iso,
+                            now_iso,
+                        ),
+                    )
+                    if int(cursor.rowcount or 0) > 0:
+                        counts["relationships_created"] += 1
+
     return counts
 
 

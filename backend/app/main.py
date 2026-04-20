@@ -19,7 +19,12 @@ from fastapi.responses import RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
 
 from backend.app.config import get_settings
-from backend.app.db import apply_pending_migrations, ensure_sqlite_db, list_spotify_auth_users
+from backend.app.db import (
+    apply_pending_migrations,
+    ensure_sqlite_db,
+    list_spotify_auth_users,
+    recover_stale_ingest_runs,
+)
 from backend.app.history_analysis import clear_history_insights_cache, get_history_signature, load_history_insights
 from backend.app.logging_config import configure_logging
 from backend.app.spotify_recent_api import fetch_spotify_recent_play_page
@@ -103,6 +108,14 @@ async def _ensure_sqlite_db_on_startup() -> None:
     validate_token_encryption_key()
     ensure_sqlite_db()
     apply_pending_migrations()
+    stale_recovery = recover_stale_ingest_runs(stale_after_minutes=60)
+    if int(stale_recovery["recovered_count"]) > 0:
+        logger.warning(
+            "event=stale_ingest_runs_recovered count=%s run_ids=%s cutoff_last_heartbeat_at=%s",
+            stale_recovery["recovered_count"],
+            ",".join(stale_recovery["recovered_run_ids"]),
+            stale_recovery["cutoff_last_heartbeat_at"],
+        )
     logger.info("event=backend_ready sqlite_initialized=true debug_log=%s", log_file_path)
 
 

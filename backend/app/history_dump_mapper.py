@@ -77,4 +77,11 @@ def map_history_dump_row(row: dict[str, Any]) -> dict[str, Any]:
         "shuffle": int(bool(row.get("shuffle"))) if row.get("shuffle") is not None else None,
         "offline": int(bool(row.get("offline"))) if row.get("offline") is not None else None,
         "conn_country": row.get("conn_country"),
+        "private_session": int(bool(row.get("incognito_mode")))
+        if row.get("incognito_mode") is not None
+        else (
+            int(bool(row.get("private_session")))
+            if row.get("private_session") is not None
+            else None
+        ),
     }

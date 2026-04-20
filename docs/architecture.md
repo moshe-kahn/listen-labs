@@ -18,7 +18,14 @@ This document is the implementation-oriented technical source of truth for the L
 - Encrypted Spotify token persistence now supports token-backed session restore for returning users.
 - Spotify recent-play API ingest is implemented with replay overlap handling, conservative early-stop paging, and batch chronology-based `ms_played` upgrades.
 - Spotify extended history JSON ingest is implemented into the same raw-play table, with cross-source upgrade support from API-estimated rows to source-truth rows.
+- Canonical play-event projection is now implemented with split raw provenance:
+  - `raw_spotify_recent`
+  - `raw_spotify_history`
+  - `fact_play_event`
+  - source link tables for canonical provenance
 - Raw duplicate-member tracking, ingest-run cleanup helpers, current-playback observation, and unified top-track SQLite queries are now implemented on top of the ingest foundation.
+- History ingest now supports an end-to-end downstream projection pipeline after canonical projection, including conservative entity backfills and relationship refresh.
+- Ingest reliability now includes startup stale-run recovery plus persisted phase timings on `ingest_run`.
 - The core overlooked-artist analysis flow and playlist creation flow are still not implemented.
 
 ### Target MVP state
@@ -85,12 +92,23 @@ This document is the implementation-oriented technical source of truth for the L
 ### Current raw tables
 - `ingest_run`
   - records run lifecycle, row counts, inserted counts, duplicate counts, and error counts
+  - also stores `last_heartbeat_at` and persisted phase timing metrics
 - `spotify_sync_state`
   - stores the recent-sync watermark, overlap lookback, and current/latest sync run metadata
 - `raw_play_event`
   - stores the raw play event plus ingest provenance and duration quality method
 - `raw_play_event_membership`
   - stores every seen `source_row_key` that maps to a canonical `raw_play_event`
+- `raw_spotify_recent`
+  - stores source-faithful recent-play observations and fallback/confidence metadata
+- `raw_spotify_history`
+  - stores source-faithful extended-history observations and timing/completion fields
+- `fact_play_event`
+  - stores canonical play-event fields with source precedence applied
+- `fact_play_event_recent_link`
+  - canonical-to-recent provenance link table
+- `fact_play_event_history_link`
+  - canonical-to-history provenance link table
 - `live_playback_event`
   - stores observational current-playback snapshots separately from durable canonical play history
 
