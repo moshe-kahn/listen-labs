@@ -233,6 +233,7 @@ These are active issues discovered during current dashboard work and should be t
 - Continue tightening documentation and instrumentation around raw ingest performance and batch import timing.
 - Decide how to choose the canonical Spotify-backed winner when multiple `source_track` rows collapse onto one `release_track`, instead of relying only on a stable internal-ID tie-break.
 - Review the generated ambiguous track-variant queue and convert repeated judgments into policy/config updates instead of expanding hardcoded suffix rules.
+- Investigate missing-phone-play windows when listening through downloaded/offline playlists (for example, 2026-04-20 11:00 AM-1:00 PM PT) and decide whether to add a deeper recovery poll path when recent API visibility appears truncated.
 
 ## Current Raw Ingest Status
 - `raw_play_event`, `ingest_run`, and `spotify_sync_state` are implemented in SQLite.

@@ -23,11 +23,40 @@ type RecentTrack = {
   artist_name: string | null;
   album_name: string | null;
   album_release_year?: string | null;
+  artists?: Array<{
+    artist_id?: string | null;
+    id?: string | null;
+    name?: string | null;
+    uri?: string | null;
+    url?: string | null;
+  }> | null;
+  duration_ms?: number | null;
+  duration_seconds?: number | null;
   uri?: string | null;
   preview_url?: string | null;
   url?: string | null;
   image_url?: string | null;
   album_id?: string | null;
+  album_url?: string | null;
+  spotify_played_at?: string | null;
+  spotify_played_at_unix_ms?: number | null;
+  spotify_context_type?: string | null;
+  spotify_context_uri?: string | null;
+  spotify_context_url?: string | null;
+  spotify_context_href?: string | null;
+  spotify_is_local?: boolean | null;
+  spotify_track_type?: string | null;
+  spotify_track_number?: number | null;
+  spotify_disc_number?: number | null;
+  spotify_explicit?: boolean | null;
+  spotify_popularity?: number | null;
+  spotify_album_type?: string | null;
+  spotify_album_total_tracks?: number | null;
+  spotify_available_markets_count?: number | null;
+  played_at_gap_ms?: number | null;
+  estimated_played_ms?: number | null;
+  estimated_played_seconds?: number | null;
+  estimated_completion_ratio?: number | null;
   play_count?: number | null;
   all_time_play_count?: number | null;
   recent_play_count?: number | null;
@@ -168,6 +197,13 @@ type RecentSectionResponse = {
   recent_likes_available: boolean;
 };
 
+type RecentArchiveResponse = {
+  items: RecentTrack[];
+  has_more: boolean;
+  limit: number;
+  offset: number;
+};
+
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "/api";
 const githubRepoUrl = "https://github.com/moshe-kahn/listen-labs";
 const EXPERIENCE_MODE_STORAGE_KEY = "listenlab-experience-mode";
@@ -178,6 +214,9 @@ const LIVE_TRACK_END_RECENT_POLL_DELAY_MS = 3_500;
 const PAGE_SIZE = 5;
 const RECENT_SECTION_FETCH_LIMIT = 10;
 const PLAYLISTS_PAGE_SIZE = 10;
+const DEBUG_SESSION_BREAK_MS = 45 * 60 * 1000;
+const DEBUG_GAP_MARKER_MIN_MS = 5_000;
+const DEBUG_GAP_MARKER_MAX_MS = 10 * 60 * 1000;
 const RECENT_RANGE_OPTIONS = [
   { value: "short_term", label: "4 weeks" },
   { value: "medium_term", label: "6 months" },
@@ -187,7 +226,7 @@ type AnalysisMode = "quick" | "full";
 type ExperienceMode = "full" | "local";
 type ExperienceVisualMode = ExperienceMode | "test";
 type TrackRankingMode = "plays" | "mix" | "longevity";
-type AppPage = "dashboard" | "tracksOnly";
+type AppPage = "dashboard" | "tracksOnly" | "recentDebug";
 const spotifyLogoDataUrl =
   "data:image/svg+xml;utf8," +
   encodeURIComponent(
@@ -393,6 +432,10 @@ type AlbumTrackEntry = {
   id: string | null;
   name: string;
   uri: string | null;
+  durationMs: number | null;
+  artistName: string | null;
+  sourceTrack: RecentTrack | null;
+  lastPlayedAt: string | null;
   isSelected: boolean;
   isTopTrack: boolean;
 };
@@ -468,6 +511,14 @@ export function App() {
   const [trackRankingMode, setTrackRankingMode] = useState<TrackRankingMode>("plays");
   const [trackRankingRefreshPending, setTrackRankingRefreshPending] = useState(false);
   const [appPage, setAppPage] = useState<AppPage>("dashboard");
+  const [showDebugLinkFields, setShowDebugLinkFields] = useState(false);
+  const [openDebugSessions, setOpenDebugSessions] = useState<Record<string, boolean>>({});
+  const [openDebugTracks, setOpenDebugTracks] = useState<Record<string, boolean>>({});
+  const [recentDebugTracks, setRecentDebugTracks] = useState<RecentTrack[]>([]);
+  const [dbArchiveTracks, setDbArchiveTracks] = useState<RecentTrack[]>([]);
+  const [dbArchiveHasMore, setDbArchiveHasMore] = useState(false);
+  const [dbArchiveOffset, setDbArchiveOffset] = useState(0);
+  const [dbArchiveLoading, setDbArchiveLoading] = useState(false);
   const [recentRangeRefreshPending, setRecentRangeRefreshPending] = useState(false);
   const [analysisMode, setAnalysisMode] = useState<AnalysisMode>("quick");
   const [experienceMode, setExperienceMode] = useState<ExperienceMode>(() => {
@@ -483,6 +534,7 @@ export function App() {
   const rateLimitMenuRef = useRef<HTMLDivElement | null>(null);
   const spotifyPlayerRef = useRef<SpotifyPlayerInstance | null>(null);
   const spotifyDeviceIdRef = useRef<string | null>(null);
+  const loadedAlbumTracksAlbumIdRef = useRef<string | null>(null);
   const liveProgressAnchorRef = useRef<{ baseProgressMs: number; receivedAtMs: number; durationMs: number } | null>(null);
   const liveEndRefreshRequestedRef = useRef(false);
   const liveControlTapMsRef = useRef(0);
@@ -523,6 +575,28 @@ export function App() {
   const playerDisplayDurationMs = shouldUseLiveSnapshotDisplay
     ? Math.max(0, Number(livePlaybackSnapshot?.duration_ms ?? 0))
     : playbackDurationMs;
+  const selectedPreviewArtistImageUrl = selectedPreview && selectedPreview.kind === "track"
+    ? findArtistImageUrl(selectedPreview.artistName ?? selectedPreview.meta)
+    : null;
+  const selectedPreviewTrackIsCurrent = Boolean(
+    selectedPreview?.kind === "track"
+    && selectedPreview.trackUri
+    && currentTrack?.uri === selectedPreview.trackUri,
+  );
+  const selectedPreviewTrackBaseDurationMs = selectedPreview?.kind === "track"
+    ? (
+      selectedPreview.sourceTrack?.duration_ms
+      ?? (selectedPreviewTrackIsCurrent
+        ? (playbackDurationMs > 0 ? playbackDurationMs : currentTrack?.durationMs ?? null)
+        : null)
+    )
+    : null;
+  const selectedPreviewTrackRemainingMs = selectedPreviewTrackIsCurrent && selectedPreviewTrackBaseDurationMs != null
+    ? Math.max(0, selectedPreviewTrackBaseDurationMs - Math.max(0, playbackPositionMs))
+    : null;
+  const selectedPreviewTrackButtonTimeMs = selectedPreview?.kind === "track" && isTrackPlaying(selectedPreview.trackUri)
+    ? (selectedPreviewTrackRemainingMs ?? selectedPreviewTrackBaseDurationMs)
+    : selectedPreviewTrackBaseDurationMs;
   const livePlaybackControlTooltip = liveReadOnlyMode
     ? `Playing on ${livePlaybackSnapshot?.device_name ?? "another device"}. Double tap to switch.`
     : undefined;
@@ -541,6 +615,14 @@ export function App() {
     reloadCooldownUntil == null
       ? 1
       : Math.max(0, Math.min(1, 1 - (reloadCooldownUntil - reloadCountdownNow) / Math.max(reloadCooldownDurationMs, 1)));
+
+  useEffect(() => {
+    if (!profile) {
+      return;
+    }
+    const latest = Array.isArray(profile.recent_tracks) ? [...profile.recent_tracks] : [];
+    setRecentDebugTracks(latest);
+  }, [profile]);
 
   useEffect(() => {
     const url = new URL(window.location.href);
@@ -878,11 +960,12 @@ export function App() {
 
   useEffect(() => {
     let cancelled = false;
-    setAlbumTrackEntries([]);
-    setAlbumTrackEntriesLoading(false);
-    setAlbumTrackEntriesError(null);
 
     if (experienceMode === "local" || !selectedPreview || selectedPreview.kind !== "track" || spotifyCooldownActive) {
+      loadedAlbumTracksAlbumIdRef.current = null;
+      setAlbumTrackEntries([]);
+      setAlbumTrackEntriesLoading(false);
+      setAlbumTrackEntriesError(null);
       return () => {
         cancelled = true;
       };
@@ -891,12 +974,27 @@ export function App() {
     const selectedTrackId = selectedPreview.trackId ?? selectedPreview.entityId;
     const albumId = selectedPreview.albumId ?? selectedPreview.sourceTrack?.album_id ?? null;
     if (!albumId) {
+      loadedAlbumTracksAlbumIdRef.current = null;
+      setAlbumTrackEntries([]);
+      setAlbumTrackEntriesLoading(false);
       setAlbumTrackEntriesError("Album track list is unavailable for this item.");
       return () => {
         cancelled = true;
       };
     }
     const albumIdSafe = albumId;
+    const albumAlreadyLoaded = loadedAlbumTracksAlbumIdRef.current === albumIdSafe;
+    if (albumAlreadyLoaded) {
+      setAlbumTrackEntries((current) => current.map((row) => ({
+        ...row,
+        isSelected: Boolean(selectedTrackId && row.id && selectedTrackId === row.id),
+      })));
+      setAlbumTrackEntriesLoading(false);
+      setAlbumTrackEntriesError(null);
+      return () => {
+        cancelled = true;
+      };
+    }
 
     const normalizedTopTrackKeys = new Set(
       [
@@ -910,6 +1008,37 @@ export function App() {
         ...(profile?.recent_top_tracks ?? []),
       ].map((track) => track.track_id).filter((value): value is string => Boolean(value)),
     );
+    const knownTracksById = new Map<string, RecentTrack>();
+    const latestPlayedAtByTrackId = new Map<string, string>();
+    const knownTrackRows = [
+      ...(profile?.recent_tracks ?? []),
+      ...(profile?.top_tracks ?? []),
+      ...(profile?.recent_top_tracks ?? []),
+      ...(profile?.recent_likes_tracks ?? []),
+    ];
+    for (const knownTrack of knownTrackRows) {
+      const knownTrackId = knownTrack.track_id;
+      if (!knownTrackId) {
+        continue;
+      }
+      if (!knownTracksById.has(knownTrackId)) {
+        knownTracksById.set(knownTrackId, knownTrack);
+      }
+      for (const candidatePlayedAt of [knownTrack.spotify_played_at, knownTrack.last_played_at]) {
+        if (!candidatePlayedAt) {
+          continue;
+        }
+        const candidateMs = parseTimestampMs(candidatePlayedAt);
+        if (candidateMs == null) {
+          continue;
+        }
+        const existingPlayedAt = latestPlayedAtByTrackId.get(knownTrackId);
+        const existingMs = parseTimestampMs(existingPlayedAt);
+        if (existingMs == null || candidateMs > existingMs) {
+          latestPlayedAtByTrackId.set(knownTrackId, candidatePlayedAt);
+        }
+      }
+    }
 
     async function loadAlbumTrackEntries() {
       setAlbumTrackEntriesLoading(true);
@@ -933,6 +1062,7 @@ export function App() {
             id?: string | null;
             name?: string | null;
             uri?: string | null;
+            duration_ms?: number | null;
             artists?: Array<{ name?: string | null }>;
           }>;
         };
@@ -941,10 +1071,16 @@ export function App() {
           const artistNames = (item.artists ?? []).map((artist) => artist.name ?? "").filter(Boolean).join(", ");
           const normalizedKey = normalizedTrackArtistKey(item.name ?? null, artistNames || null);
           const isTopTrack = Boolean((id && topTrackIds.has(id)) || normalizedTopTrackKeys.has(normalizedKey));
+          const sourceTrack = id ? (knownTracksById.get(id) ?? null) : null;
+          const lastPlayedAt = id ? (latestPlayedAtByTrackId.get(id) ?? null) : null;
           return {
             id,
             name: item.name ?? "Unknown track",
             uri: item.uri ?? null,
+            durationMs: typeof item.duration_ms === "number" && Number.isFinite(item.duration_ms) ? Math.max(0, item.duration_ms) : null,
+            artistName: artistNames || null,
+            sourceTrack,
+            lastPlayedAt,
             isSelected: Boolean(selectedTrackId && id && selectedTrackId === id),
             isTopTrack,
           } satisfies AlbumTrackEntry;
@@ -952,6 +1088,7 @@ export function App() {
 
         if (!cancelled) {
           setAlbumTrackEntries(rows);
+          loadedAlbumTracksAlbumIdRef.current = albumIdSafe;
           if (rows.length === 0) {
             setAlbumTrackEntriesError("No tracks were returned for this album.");
           }
@@ -971,7 +1108,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [experienceMode, profile?.recent_top_tracks, profile?.top_tracks, selectedPreview, spotifyCooldownActive]);
+  }, [experienceMode, profile?.recent_likes_tracks, profile?.recent_top_tracks, profile?.recent_tracks, profile?.top_tracks, selectedPreview, spotifyCooldownActive]);
 
   function representativeReasonMessage(reason: string | null, kind: "artist" | "album") {
     switch (reason) {
@@ -1054,6 +1191,16 @@ export function App() {
     return trackId || null;
   }
 
+  function trackUriWithFallback(trackUri: string | null | undefined, trackId: string | null | undefined) {
+    if (trackUri && trackUri.startsWith("spotify:track:")) {
+      return trackUri;
+    }
+    if (trackId) {
+      return `spotify:track:${trackId}`;
+    }
+    return null;
+  }
+
   function openPlayerTrackDetails() {
     if (!playerDisplayTrack || !usingLivePlaybackSnapshot) {
       return;
@@ -1095,6 +1242,61 @@ export function App() {
     const minutes = Math.floor(safeSeconds / 60);
     const seconds = safeSeconds % 60;
     return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+  }
+
+  function parseTimestampMs(value: string | null | undefined): number | null {
+    if (!value) {
+      return null;
+    }
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) {
+      return null;
+    }
+    return parsed.getTime();
+  }
+
+  function formatMonthDay(value: string | null | undefined): string | null {
+    const parsedMs = parseTimestampMs(value);
+    if (parsedMs == null) {
+      return null;
+    }
+    const parsed = new Date(parsedMs);
+    return `${parsed.getMonth() + 1}/${parsed.getDate()}`;
+  }
+
+  function primaryArtistName(value: string | null | undefined): string | null {
+    if (!value) {
+      return null;
+    }
+    const primary = value.split(",")[0]?.trim() ?? "";
+    return primary || null;
+  }
+
+  function findArtistImageUrl(artistName: string | null | undefined): string | null {
+    const target = primaryArtistName(artistName)?.toLocaleLowerCase() ?? null;
+    if (!target || !profile) {
+      return null;
+    }
+    const artistPools = [
+      ...(profile.followed_artists ?? []),
+      ...(profile.recent_top_artists ?? []),
+    ];
+    for (const artist of artistPools) {
+      const candidate = artist.name?.trim().toLocaleLowerCase() ?? null;
+      if (!candidate || !artist.image_url) {
+        continue;
+      }
+      if (candidate === target) {
+        return artist.image_url;
+      }
+    }
+    return null;
+  }
+
+  function previewAlbumHeading(preview: PreviewItem): string {
+    const albumName = preview.sourceTrack?.album_name ?? preview.detail ?? "Album";
+    const albumYear = preview.sourceTrack?.album_release_year ?? null;
+    return albumYear ? `${albumYear} - ${albumName}` : albumName;
   }
 
   useEffect(() => {
@@ -1399,6 +1601,37 @@ export function App() {
 
   function isTrackPlaying(trackUri: string | null) {
     return Boolean(trackUri && currentTrack?.uri === trackUri && !playbackPaused);
+  }
+
+  function openAlbumTrackPreview(track: AlbumTrackEntry) {
+    if (!selectedPreview || selectedPreview.kind !== "track") {
+      return;
+    }
+    const previewTrackUri = trackUriWithFallback(track.uri, track.id);
+    const previewTrackUrl = spotifyTrackUrl(previewTrackUri) ?? (track.id ? `https://open.spotify.com/track/${track.id}` : selectedPreview.url);
+    setSelectedPreview({
+      image: track.sourceTrack?.image_url ?? selectedPreview.image ?? null,
+      fallbackLabel: selectedPreview.fallbackLabel,
+      label: track.name,
+      meta: track.artistName ?? track.sourceTrack?.artist_name ?? selectedPreview.meta ?? null,
+      detail: track.sourceTrack?.album_name ?? selectedPreview.detail,
+      kind: "track",
+      entityId: track.id ?? null,
+      trackUri: previewTrackUri,
+      url: previewTrackUrl,
+      trackId: track.id ?? null,
+      albumId: selectedPreview.albumId ?? selectedPreview.sourceTrack?.album_id ?? null,
+      artistName: track.artistName ?? track.sourceTrack?.artist_name ?? selectedPreview.artistName ?? null,
+      sourceTrack: track.sourceTrack ?? selectedPreview.sourceTrack ?? null,
+    });
+  }
+
+  async function handleAlbumTrackPlay(track: AlbumTrackEntry, trackUri: string | null) {
+    if (!trackUri) {
+      return;
+    }
+    await handlePopupTrackPlayback(trackUri);
+    openAlbumTrackPreview(track);
   }
 
   function recentRangeLabel(range: RecentRange) {
@@ -2837,7 +3070,9 @@ export function App() {
             detail: tertiaryText ?? null,
             kind: previewKind,
             entityId: entityId ?? null,
-            trackUri: trackUri ?? null,
+            trackUri: previewKind === "track"
+              ? trackUriWithFallback(trackUri, previewTrack?.track_id ?? entityId ?? null)
+              : trackUri ?? null,
             url: href ?? "",
             trackId: previewTrack?.track_id ?? null,
             albumId: previewTrack?.album_id ?? null,
@@ -3012,54 +3247,643 @@ export function App() {
   }
 
   function renderTracksOnlyPage() {
-  if (!profile) {
+    if (!profile) {
+      return null;
+    }
+
+    return (
+      <section className="info-card info-card-wide tracks-only-card" id="tracks-page">
+        <div className="tracks-only-header">
+          <div className="section-column-header">
+            <h2>Tracks</h2>
+            {renderTrackRankingToggle()}
+          </div>
+          <button
+            className="secondary-button tracks-only-back-button"
+            onClick={() => setAppPage("dashboard")}
+            type="button"
+          >
+            Back to dashboard
+          </button>
+        </div>
+        <div className="artists-grid">
+          <div className="artists-column">
+            <h3>Current formula</h3>
+            {renderTrackColumn(
+              "tracksAllTimeCurrent",
+              profile.top_tracks,
+              profile.top_tracks_available,
+              "Spotify returned no top tracks for this account.",
+              quickUnavailableCopy("Top tracks are not available for this session yet. Log out and log back in to grant access."),
+              undefined,
+              false,
+            )}
+          </div>
+          <div className="artists-column">
+            <h3>New formula</h3>
+            {renderTrackColumn(
+              "tracksAllTimeNew",
+              profile.top_tracks,
+              profile.top_tracks_available,
+              "Spotify returned no top tracks for this account.",
+              quickUnavailableCopy("Top tracks are not available for this session yet. Log out and log back in to grant access."),
+              undefined,
+              false,
+            )}
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  function formatDurationMs(value: unknown): string {
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+      return "Unknown";
+    }
+    const totalSeconds = Math.round(value / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${String(seconds).padStart(2, "0")}`;
+  }
+
+  function formatDebugTimestamp(value: unknown): string {
+    if (typeof value !== "string" || !value) {
+      return "Unknown";
+    }
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) {
+      return value;
+    }
+    return parsed.toLocaleString();
+  }
+
+  function formatTimeOnly(value: unknown): string {
+    if (typeof value !== "string" || !value) {
+      return "Unknown";
+    }
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) {
+      return value;
+    }
+    return parsed.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
+  }
+
+  function trackEstimatedMs(track: RecentTrack): number | null {
+    if (typeof track.estimated_played_ms === "number" && Number.isFinite(track.estimated_played_ms)) {
+      return Math.max(0, track.estimated_played_ms);
+    }
+    if (typeof track.duration_ms === "number" && Number.isFinite(track.duration_ms)) {
+      return Math.max(0, track.duration_ms);
+    }
     return null;
   }
 
-  return (
-    <section className="info-card info-card-wide tracks-only-card" id="tracks-page">
-      <div className="tracks-only-header">
-        <div className="section-column-header">
-          <h2>Tracks</h2>
-          {renderTrackRankingToggle()}
+  function formatDebugLabel(key: string): string {
+    if (key === "spotify_played_at") {
+      return "Played at";
+    }
+    if (key === "played_at_gap_ms") {
+      return "Gap to previous play";
+    }
+    return key
+      .replace(/_/g, " ")
+      .replace(/\b\w/g, (letter) => letter.toUpperCase());
+  }
+
+  function isLinkOrUriField(key: string, value: unknown): boolean {
+    if (key.toLowerCase().includes("url") || key.toLowerCase().includes("uri") || key.toLowerCase().includes("href")) {
+      return true;
+    }
+    if (typeof value === "string" && /^https?:\/\//i.test(value)) {
+      return true;
+    }
+    return false;
+  }
+
+  function isComputedField(key: string): boolean {
+    if (key.startsWith("estimated_")) {
+      return true;
+    }
+    return [
+      "played_at_gap_ms",
+      "duration_seconds",
+      "spotify_played_at_unix_ms",
+      "play_count",
+      "all_time_play_count",
+      "recent_play_count",
+      "first_played_at",
+      "last_played_at",
+      "listening_span_days",
+      "listening_span_years",
+      "active_months_count",
+      "span_months_count",
+      "consistency_ratio",
+      "longevity_score",
+      "estimated_completion_ratio",
+    ].includes(key);
+  }
+
+  function formatDebugValue(key: string, value: unknown): string {
+    if (value === null) {
+      return "null";
+    }
+    if (value === undefined) {
+      return "undefined";
+    }
+    if (key === "artists" && Array.isArray(value)) {
+      const names = value
+        .map((artist) => (artist && typeof artist === "object" ? (artist as { name?: unknown }).name : null))
+        .filter((name): name is string => typeof name === "string" && name.length > 0);
+      return names.length > 0 ? names.join(", ") : "[]";
+    }
+    if (key.endsWith("_at")) {
+      return formatDebugTimestamp(value);
+    }
+    if (key === "duration_ms" || key === "estimated_played_ms") {
+      return formatDurationMs(value);
+    }
+    if (key === "played_at_gap_ms") {
+      return formatDurationMs(value);
+    }
+    if (key === "duration_seconds" || key === "estimated_played_seconds") {
+      return typeof value === "number" ? formatDurationMs(value * 1000) : String(value);
+    }
+    if (key === "estimated_completion_ratio" || key === "consistency_ratio") {
+      return typeof value === "number" ? `${(value * 100).toFixed(1)}%` : String(value);
+    }
+    if (typeof value === "string") {
+      return value.length > 0 ? value : '""';
+    }
+    if (typeof value === "object") {
+      try {
+        return JSON.stringify(value);
+      } catch {
+        return "[unserializable value]";
+      }
+    }
+    return String(value);
+  }
+
+  function trackPlayedAtMs(track: RecentTrack): number | null {
+    if (!track.spotify_played_at) {
+      return null;
+    }
+    const parsed = new Date(track.spotify_played_at);
+    if (Number.isNaN(parsed.getTime())) {
+      return null;
+    }
+    return parsed.getTime();
+  }
+
+  type DebugSession = {
+    id: string;
+    tracks: RecentTrack[];
+    startedAt: number | null;
+    endedAt: number | null;
+  };
+
+  function buildDebugSessions(tracks: RecentTrack[]): DebugSession[] {
+    const sortedTracks = [...tracks].sort((a, b) => {
+      const aMs = trackPlayedAtMs(a) ?? -1;
+      const bMs = trackPlayedAtMs(b) ?? -1;
+      return bMs - aMs;
+    });
+    const sessions: DebugSession[] = [];
+    let currentTracks: RecentTrack[] = [];
+    let previousTrackMs: number | null = null;
+
+    for (const track of sortedTracks) {
+      const currentTrackMs = trackPlayedAtMs(track);
+      const startsNewSession = (
+        currentTracks.length > 0
+        && (
+          currentTrackMs == null
+          || previousTrackMs == null
+          || previousTrackMs - currentTrackMs > DEBUG_SESSION_BREAK_MS
+          || previousTrackMs < currentTrackMs
+        )
+      );
+
+      if (startsNewSession) {
+        const allTimes = currentTracks
+          .map((sessionTrack) => trackPlayedAtMs(sessionTrack))
+          .filter((value): value is number => value != null);
+        const startedAt = allTimes.length > 0 ? Math.max(...allTimes) : null;
+        const endedAt = allTimes.length > 0 ? Math.min(...allTimes) : null;
+        sessions.push({
+          id: `session-${sessions.length + 1}-${startedAt ?? "na"}-${endedAt ?? "na"}`,
+          tracks: currentTracks,
+          startedAt,
+          endedAt,
+        });
+        currentTracks = [];
+      }
+
+      currentTracks.push(track);
+      previousTrackMs = currentTrackMs;
+    }
+
+    if (currentTracks.length > 0) {
+      const allTimes = currentTracks
+        .map((sessionTrack) => trackPlayedAtMs(sessionTrack))
+        .filter((value): value is number => value != null);
+      const startedAt = allTimes.length > 0 ? Math.max(...allTimes) : null;
+      const endedAt = allTimes.length > 0 ? Math.min(...allTimes) : null;
+      sessions.push({
+        id: `session-${sessions.length + 1}-${startedAt ?? "na"}-${endedAt ?? "na"}`,
+        tracks: currentTracks,
+        startedAt,
+        endedAt,
+      });
+    }
+
+    return sessions;
+  }
+
+  function formatSessionRange(session: DebugSession): string {
+    if (session.startedAt == null || session.endedAt == null) {
+      return "Time range unavailable";
+    }
+    const earlierMs = Math.min(session.startedAt, session.endedAt);
+    const laterMs = Math.max(session.startedAt, session.endedAt);
+    const earlier = new Date(earlierMs);
+    const later = new Date(laterMs);
+    const sameLocalDate = (
+      earlier.getFullYear() === later.getFullYear()
+      && earlier.getMonth() === later.getMonth()
+      && earlier.getDate() === later.getDate()
+    );
+    if (sameLocalDate) {
+      const dateText = earlier.toLocaleDateString();
+      const startTime = earlier.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
+      const endTime = later.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
+      return `${dateText} ${startTime} - ${endTime}`;
+    }
+    const startText = earlier.toLocaleString();
+    const endText = later.toLocaleString();
+    return `${startText} - ${endText}`;
+  }
+
+  function debugTrackKey(sessionId: string, track: RecentTrack, index: number): string {
+    return `${sessionId}-${track.spotify_played_at ?? "na"}-${track.track_id ?? "no-id"}-${index}`;
+  }
+
+  function renderRecentDebugPage() {
+    if (!profile) {
+      return null;
+    }
+
+    const trackKey = (track: RecentTrack): string => [
+      track.spotify_played_at ?? "na",
+      track.track_id ?? "no-id",
+      track.uri ?? "no-uri",
+      track.track_name ?? "no-track",
+      track.artist_name ?? "no-artist",
+    ].join("||");
+
+    const latestSortedTracks = [...recentDebugTracks].sort((a, b) => {
+      const aMs = trackPlayedAtMs(a) ?? -1;
+      const bMs = trackPlayedAtMs(b) ?? -1;
+      return bMs - aMs;
+    });
+    const mergedAllTracks: RecentTrack[] = [];
+    const mergedSeen = new Set<string>();
+    for (const track of [...latestSortedTracks, ...dbArchiveTracks]) {
+      const key = trackKey(track);
+      if (mergedSeen.has(key)) {
+        continue;
+      }
+      mergedSeen.add(key);
+      mergedAllTracks.push(track);
+    }
+    const allSortedTracks = [...mergedAllTracks].sort((a, b) => {
+      const aMs = trackPlayedAtMs(a) ?? -1;
+      const bMs = trackPlayedAtMs(b) ?? -1;
+      return bMs - aMs;
+    });
+    const visibleTracks = allSortedTracks;
+    const sessions = buildDebugSessions(visibleTracks);
+    const canTryLoadMore = experienceMode === "full" && (dbArchiveOffset === 0 || dbArchiveHasMore);
+    const buildSpotifyUrl = (kind: "track" | "artist" | "album", id: string | null): string =>
+      id ? `https://open.spotify.com/${kind}/${id}` : "";
+    const firstArtist = (track: RecentTrack) => track.artists?.find((artist) => Boolean(artist?.name || artist?.id || artist?.artist_id)) ?? null;
+    const openDebugPreview = (track: RecentTrack, kind: PreviewItem["kind"]) => {
+      const artist = firstArtist(track);
+      const artistLabel = artist?.name ?? track.artist_name ?? "Unknown artist";
+      const albumLabel = track.album_name ?? "Unknown album";
+      const releaseYear = track.album_release_year ?? null;
+
+      if (kind === "track") {
+        const fallbackTrackUrl = buildSpotifyUrl("track", track.track_id ?? null);
+        setSelectedPreview({
+          image: track.image_url ?? null,
+          fallbackLabel: "T",
+          label: track.track_name ?? "Unknown track",
+          meta: track.artist_name ?? null,
+          detail: track.album_name ?? null,
+          kind: "track",
+          entityId: track.track_id ?? null,
+          trackUri: trackUriWithFallback(track.uri, track.track_id),
+          url: track.url ?? fallbackTrackUrl,
+          trackId: track.track_id ?? null,
+          albumId: track.album_id ?? null,
+          artistName: track.artist_name ?? null,
+          sourceTrack: track,
+        });
+        return;
+      }
+
+      if (kind === "artist") {
+        const artistId = artist?.artist_id ?? artist?.id ?? null;
+        const fallbackArtistUrl = buildSpotifyUrl("artist", artistId);
+        setSelectedPreview({
+          image: track.image_url ?? null,
+          fallbackLabel: "A",
+          label: artistLabel,
+          meta: null,
+          detail: null,
+          kind: "artist",
+          entityId: artistId,
+          trackUri: null,
+          url: artist?.url ?? fallbackArtistUrl,
+          trackId: null,
+          albumId: null,
+          artistName: artistLabel,
+          sourceTrack: track,
+        });
+        return;
+      }
+
+      const fallbackAlbumUrl = buildSpotifyUrl("album", track.album_id ?? null);
+      setSelectedPreview({
+        image: track.image_url ?? null,
+        fallbackLabel: "L",
+        label: albumLabel,
+        meta: track.artist_name ?? null,
+        detail: releaseYear,
+        kind: "album",
+        entityId: track.album_id ?? null,
+        trackUri: null,
+        url: track.album_url ?? fallbackAlbumUrl,
+        trackId: null,
+        albumId: track.album_id ?? null,
+        artistName: track.artist_name ?? null,
+        sourceTrack: track,
+      });
+    };
+
+    const debugFieldOrder = [
+      "track_id",
+      "track_name",
+      "artist_name",
+      "album_name",
+      "album_release_year",
+      "album_id",
+      "artists",
+      "spotify_played_at",
+      "duration_ms",
+      "estimated_played_ms",
+      "estimated_completion_ratio",
+      "spotify_context_type",
+      "spotify_context_uri",
+      "spotify_context_url",
+      "spotify_context_href",
+    ];
+
+    return (
+      <section className="info-card info-card-wide tracks-only-card" id="recent-debug-page">
+        <div className="tracks-only-header">
+          <div className="section-column-header">
+            <h2>Recent Songs Debug</h2>
+            <div className="recent-debug-controls">
+              <label className="recent-debug-filter">
+                <input
+                  checked={showDebugLinkFields}
+                  onChange={(event) => setShowDebugLinkFields(event.currentTarget.checked)}
+                  type="checkbox"
+                />
+                Show raw data
+              </label>
+            </div>
+          </div>
+          <button
+            className="secondary-button tracks-only-back-button"
+            onClick={() => setAppPage("dashboard")}
+            type="button"
+          >
+            Back to activity
+          </button>
         </div>
-        <button
-          className="secondary-button tracks-only-back-button"
-          onClick={() => setAppPage("dashboard")}
-          type="button"
-        >
-          Back to dashboard
-        </button>
-      </div>
-      <div className="artists-grid">
-        <div className="artists-column">
-          <h3>Current formula</h3>
-          {renderTrackColumn(
-            "tracksAllTimeCurrent",
-            profile.top_tracks,
-            profile.top_tracks_available,
-            "Spotify returned no top tracks for this account.",
-            quickUnavailableCopy("Top tracks are not available for this session yet. Log out and log back in to grant access."),
-            undefined,
-            false,
-          )}
-        </div>
-        <div className="artists-column">
-          <h3>New formula</h3>
-          {renderTrackColumn(
-            "tracksAllTimeNew",
-            profile.top_tracks,
-            profile.top_tracks_available,
-            "Spotify returned no top tracks for this account.",
-            quickUnavailableCopy("Top tracks are not available for this session yet. Log out and log back in to grant access."),
-            undefined,
-            false,
-          )}
-        </div>
-      </div>
-    </section>
-  );
-}
+        {visibleTracks.length === 0 ? (
+          <p className="empty-copy">No recent songs are currently available.</p>
+        ) : (
+          <div className="recent-debug-list">
+            {sessions.map((session, sessionIndex) => {
+              const isSessionOpen = showDebugLinkFields || (openDebugSessions[session.id] ?? sessionIndex === 0);
+              return (
+                <section className="recent-debug-session" key={session.id}>
+                  <button
+                    className="recent-debug-session-toggle"
+                    onClick={() =>
+                      setOpenDebugSessions((current) => ({
+                        ...current,
+                        [session.id]: !isSessionOpen,
+                      }))
+                    }
+                    type="button"
+                  >
+                    <span className="recent-debug-session-title">
+                      Session {sessionIndex + 1}: {formatSessionRange(session)} ({session.tracks.length} {session.tracks.length === 1 ? "play" : "plays"})
+                    </span>
+                    <span>{isSessionOpen ? "^" : "v"}</span>
+                  </button>
+                  {isSessionOpen ? (
+                    <div className="recent-debug-session-list">
+                      {session.tracks.map((track, index) => {
+                        const trackKey = debugTrackKey(session.id, track, index);
+                        const isTrackOpen = showDebugLinkFields || Boolean(openDebugTracks[trackKey]);
+                        const albumSummary = track.album_name ?? "Unknown album";
+                        const albumWithYear = track.album_release_year
+                          ? `${track.album_release_year} - ${albumSummary}`
+                          : albumSummary;
+                        const playedAtSummary = formatDebugTimestamp(track.spotify_played_at ?? null);
+                        const durationSummary = formatDurationMs(track.duration_ms ?? null);
+                        const estimatedSummary = formatDurationMs(track.estimated_played_ms ?? null);
+                        const endMs = trackPlayedAtMs(track);
+                        const estimatedMs = trackEstimatedMs(track);
+                        const startMs = endMs != null && estimatedMs != null ? Math.max(0, endMs - estimatedMs) : null;
+                        const playedGapMsValue = typeof track.played_at_gap_ms === "number"
+                          ? Math.max(0, Math.round(track.played_at_gap_ms))
+                          : null;
+                        const timeRangeSummary =
+                          startMs != null && endMs != null
+                            ? `${new Date(startMs).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })} - ${new Date(endMs).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}`
+                            : formatTimeOnly(track.spotify_played_at ?? null);
+                        const completionRatio =
+                          typeof track.estimated_completion_ratio === "number"
+                            ? Math.max(0, Math.min(1, track.estimated_completion_ratio))
+                            : typeof track.duration_ms === "number" && track.duration_ms > 0 && typeof track.estimated_played_ms === "number"
+                              ? Math.max(0, Math.min(1, track.estimated_played_ms / track.duration_ms))
+                              : 0;
+                        const nextOlderTrack = index + 1 < session.tracks.length ? session.tracks[index + 1] : null;
+                        const nextOlderEndMs = nextOlderTrack ? trackPlayedAtMs(nextOlderTrack) : null;
+                        const interTrackGapMs =
+                          startMs != null && nextOlderEndMs != null
+                            ? Math.max(0, startMs - nextOlderEndMs)
+                            : null;
+                        const showGapMarker = Boolean(
+                          interTrackGapMs != null
+                          && interTrackGapMs >= DEBUG_GAP_MARKER_MIN_MS
+                          && interTrackGapMs <= DEBUG_GAP_MARKER_MAX_MS,
+                        );
+                        const rowEntries = Object.entries(track)
+                          .filter(([key, value]) => {
+                            if (!showDebugLinkFields && isLinkOrUriField(key, value)) {
+                              return false;
+                            }
+                            if (key === "duration_seconds" || key === "estimated_played_seconds") {
+                              return false;
+                            }
+                            if (key === "duration_ms" || key === "estimated_played_ms") {
+                              return false;
+                            }
+                            return true;
+                          })
+                          .sort(([keyA], [keyB]) => {
+                            const indexA = debugFieldOrder.indexOf(keyA);
+                            const indexB = debugFieldOrder.indexOf(keyB);
+                            const rankA = indexA === -1 ? 10_000 : indexA;
+                            const rankB = indexB === -1 ? 10_000 : indexB;
+                            if (rankA !== rankB) {
+                              return rankA - rankB;
+                            }
+                            return keyA.localeCompare(keyB);
+                          });
+
+                        return (
+                          <div className="recent-debug-item-wrap" key={trackKey}>
+                            <article className="recent-debug-item">
+                            <div className="recent-debug-item-top">
+                              <div className="recent-debug-item-summary">
+                                <p className="recent-debug-item-time" title={playedAtSummary}>
+                                  {timeRangeSummary}
+                                </p>
+                                <div className="recent-debug-title-row">
+                                  <button
+                                    className="recent-debug-link recent-debug-item-title"
+                                    onClick={() => openDebugPreview(track, "track")}
+                                    title={track.track_name ?? "Unknown track"}
+                                    type="button"
+                                  >
+                                    {track.track_name ?? "Unknown track"}
+                                  </button>
+                                </div>
+                                <button
+                                  className="empty-copy recent-debug-link recent-debug-item-meta"
+                                  onClick={() => openDebugPreview(track, "artist")}
+                                  title={track.artist_name ?? "Unknown artist"}
+                                  type="button"
+                                >
+                                  {track.artist_name ?? "Unknown artist"}
+                                </button>
+                                <button
+                                  className="empty-copy recent-debug-link recent-debug-item-album"
+                                  onClick={() => openDebugPreview(track, "album")}
+                                  title={albumWithYear}
+                                  type="button"
+                                >
+                                  {albumWithYear}
+                                </button>
+                                <div
+                                  className="recent-debug-completion"
+                                  title={`Estimated completion*: ${(completionRatio * 100).toFixed(1)}%`}
+                                >
+                                  <div
+                                    className="recent-debug-completion-fill"
+                                    style={{ width: `${completionRatio * 100}%` }}
+                                  />
+                                </div>
+                                <div className="recent-debug-times">
+                                  <span className="recent-debug-time-chip">
+                                    Gap to previous play*: {formatDurationMs(playedGapMsValue)}
+                                  </span>
+                                  <span className="recent-debug-time-chip">Length: {durationSummary}</span>
+                                  <span className="recent-debug-time-chip">Estimated played*: {estimatedSummary}</span>
+                                </div>
+                              </div>
+                              {!showDebugLinkFields ? (
+                                <button
+                                  className="secondary-button recent-debug-expand-button"
+                                  onClick={() =>
+                                    setOpenDebugTracks((current) => ({
+                                      ...current,
+                                      [trackKey]: !isTrackOpen,
+                                    }))
+                                  }
+                                  type="button"
+                                >
+                                  {isTrackOpen ? "Hide data" : "Show data"}
+                                </button>
+                              ) : null}
+                            </div>
+                            {isTrackOpen ? (
+                              <div className="recent-debug-grid">
+                                {rowEntries.map(([key, value]) => (
+                                  <div className="recent-debug-row" key={`${trackKey}-${key}`}>
+                                    <span className="recent-debug-key">
+                                      {formatDebugLabel(key)}
+                                      {isComputedField(key) ? "*" : ""}
+                                    </span>
+                                    <span className="recent-debug-value">{formatDebugValue(key, value)}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : null}
+                            </article>
+                            {showGapMarker ? (
+                              <div
+                                className="recent-debug-gap"
+                                title={`Gap of ${formatDurationMs(interTrackGapMs ?? null)} before this play`}
+                              >
+                                <span className="recent-debug-gap-line" />
+                                <span className="recent-debug-gap-text">
+                                  {interTrackGapMs != null ? `${Math.max(0, Math.round(interTrackGapMs / 1000))}s gap` : "gap"}
+                                </span>
+                                <span className="recent-debug-gap-line" />
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                </section>
+              );
+            })}
+            <div className="recent-debug-footer">
+              <button
+                className="secondary-button"
+                disabled={!canTryLoadMore || dbArchiveLoading}
+                onClick={() => void loadRecentArchiveBatch(false)}
+                title={
+                  dbArchiveLoading
+                    ? "Loading older tracks..."
+                    : experienceMode !== "full"
+                      ? "Older database history requires full Spotify mode"
+                      : canTryLoadMore
+                        ? "Load 50 more tracks from database history"
+                        : "No additional tracks in database history"
+                }
+                type="button"
+              >
+                {dbArchiveLoading ? "Loading..." : canTryLoadMore ? "Show 50 more" : "No more yet"}
+              </button>
+            </div>
+          </div>
+        )}
+      </section>
+    );
+  }
 
   function renderAlbumColumn(
     section: SectionKey,
@@ -3465,6 +4289,46 @@ export function App() {
       throw new Error(detail);
     }
     return (await response.json()) as RecentSectionResponse;
+  }
+
+  async function fetchRecentArchive(limit: number, offset: number): Promise<RecentArchiveResponse> {
+    const endpoint = "/me/recent/archive";
+    const response = await fetch(
+      `${apiBaseUrl}${endpoint}?limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`,
+      { credentials: "include" },
+    );
+    if (!response.ok) {
+      let detail = "Failed to load recent archive.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      throw new Error(detail);
+    }
+    return (await response.json()) as RecentArchiveResponse;
+  }
+
+  async function loadRecentArchiveBatch(reset: boolean = false) {
+    if (dbArchiveLoading || experienceMode !== "full") {
+      return;
+    }
+    setDbArchiveLoading(true);
+    try {
+      const targetOffset = reset ? 0 : dbArchiveOffset;
+      const archive = await fetchRecentArchive(50, targetOffset);
+      setDbArchiveTracks((current) => (reset ? archive.items : [...current, ...archive.items]));
+      setDbArchiveOffset(targetOffset + archive.items.length);
+      setDbArchiveHasMore(Boolean(archive.has_more));
+    } catch (error) {
+      const message = formatUiErrorMessage(error, "Failed to load recent archive.");
+      setStatusHistory((current) => [...current, `Recent archive error: ${message}`]);
+    } finally {
+      setDbArchiveLoading(false);
+    }
   }
 
   async function refreshRecentSection(targetRange: RecentRange = recentRange) {
@@ -3951,13 +4815,30 @@ export function App() {
               <div className="dashboard-grid">
                 {renderTracksOnlyPage()}
               </div>
+            ) : appPage === "recentDebug" ? (
+              <div className="dashboard-grid">
+                {renderRecentDebugPage()}
+              </div>
             ) : (
             <div className="dashboard-grid">
               {renderDualSectionCard({
                 title: renderSectionTitle("Activity", "recent_likes"),
                 section: "recent",
                 anchorId: "activity",
-                leftTitle: "Recently played",
+                leftTitle: (
+                  <div className="section-column-header">
+                    <h3>Recently played</h3>
+                    <div className="section-column-header-actions">
+                      <button
+                        className="secondary-button tracks-page-link-button"
+                        onClick={() => setAppPage("recentDebug")}
+                        type="button"
+                      >
+                        Open recent debug
+                      </button>
+                    </div>
+                  </div>
+                ),
                 rightTitle: renderSectionTitle("Recently liked", "recent_likes"),
                 leftContent: renderTrackColumn(
                   "recent",
@@ -4151,17 +5032,30 @@ export function App() {
           role="dialog"
         >
           <section className="detail-modal" onClick={(event) => event.stopPropagation()}>
-            {selectedPreview.image ? (
-              <img alt={selectedPreview.label} className="detail-modal-image" src={selectedPreview.image} />
-            ) : (
-              <div className="detail-modal-image detail-modal-image-fallback" aria-hidden="true">
-                {selectedPreview.fallbackLabel ?? selectedPreview.label.slice(0, 1).toUpperCase()}
-              </div>
-            )}
+            <div className="detail-modal-left">
+              {selectedPreview.image ? (
+                <img alt={selectedPreview.label} className="detail-modal-image" src={selectedPreview.image} />
+              ) : (
+                <div className="detail-modal-image detail-modal-image-fallback" aria-hidden="true">
+                  {selectedPreview.fallbackLabel ?? selectedPreview.label.slice(0, 1).toUpperCase()}
+                </div>
+              )}
+            </div>
             <div className="detail-modal-copy">
               <h2>{selectedPreview.label}</h2>
-              {selectedPreview.meta ? <p className="detail-modal-meta">{selectedPreview.meta}</p> : null}
-              {selectedPreview.detail ? <p className="detail-modal-detail">{selectedPreview.detail}</p> : null}
+              {selectedPreview.meta ? (
+                <div className="detail-modal-meta detail-modal-meta-with-image">
+                  {selectedPreview.kind === "track" && selectedPreviewArtistImageUrl ? (
+                    <img
+                      alt=""
+                      className="detail-modal-artist-image"
+                      src={selectedPreviewArtistImageUrl}
+                    />
+                  ) : null}
+                  <span>{selectedPreview.meta}</span>
+                </div>
+              ) : null}
+              {selectedPreview.detail && selectedPreview.kind !== "track" ? <p className="detail-modal-detail">{selectedPreview.detail}</p> : null}
               {selectedPreview.kind === "track" && !selectedPreview.trackUri ? (
                 <p className="detail-modal-preview-missing">This track does not have a playable Spotify URI.</p>
               ) : null}
@@ -4193,7 +5087,7 @@ export function App() {
                 {hasPremiumPlayback && selectedPreview.kind === "track" && selectedPreview.trackUri ? (
                   <button
                     aria-label={isTrackPlaying(selectedPreview.trackUri) ? "Currently playing in ListenLab" : "Play in ListenLab"}
-                    className={`secondary-button detail-icon-button${isTrackPlaying(selectedPreview.trackUri) ? " detail-icon-button-playing" : ""}`}
+                    className={`secondary-button detail-icon-button detail-icon-button-with-time${isTrackPlaying(selectedPreview.trackUri) ? " detail-icon-button-playing" : ""}`}
                     onClick={() => void handlePopupTrackPlayback(selectedPreview.trackUri)}
                     type="button"
                   >
@@ -4204,8 +5098,11 @@ export function App() {
                         <span />
                       </span>
                     ) : (
-                      <span className="detail-play-icon" aria-hidden="true">▶</span>
+                      <span className="detail-play-icon" aria-hidden="true">{"\u25B6"}</span>
                     )}
+                    <span className="detail-album-track-play-time">
+                      {selectedPreviewTrackButtonTimeMs != null ? formatPlaybackClock(selectedPreviewTrackButtonTimeMs) : "?:??"}
+                    </span>
                   </button>
                 ) : null}
                 {hasPremiumPlayback && (selectedPreview.kind === "artist" || selectedPreview.kind === "album") && representativeTrack?.uri ? (
@@ -4235,28 +5132,79 @@ export function App() {
                   Open in Spotify
                 </a>
               </div>
-              {selectedPreview.kind === "track" ? (
-                <div className="detail-modal-album-tracks">
-                  <p className="detail-modal-audio-label">Album songs</p>
-                  {albumTrackEntriesLoading ? (
-                    <p className="detail-modal-preview-missing">Loading album songs...</p>
-                  ) : null}
-                  {!albumTrackEntriesLoading && albumTrackEntriesError ? (
-                    <p className="detail-modal-preview-missing">{albumTrackEntriesError}</p>
-                  ) : null}
-                  {!albumTrackEntriesLoading && !albumTrackEntriesError && albumTrackEntries.length > 0 ? (
-                    <ul className="detail-album-track-list">
-                      {albumTrackEntries.map((track) => (
-                        <li className={`detail-album-track-row${track.isSelected ? " detail-album-track-row-selected" : ""}`} key={track.id ?? track.name}>
-                          <span className="detail-album-track-name single-line-ellipsis">{track.name}</span>
-                          {track.isTopTrack && !track.isSelected ? <span className="detail-album-track-star" aria-label="Other top track">*</span> : null}
-                        </li>
-                      ))}
-                    </ul>
-                  ) : null}
-                </div>
-              ) : null}
             </div>
+            {selectedPreview.kind === "track" ? (
+              <div className="detail-modal-album-tracks detail-modal-album-tracks-full">
+                <p className="detail-modal-album-title">{previewAlbumHeading(selectedPreview)}</p>
+                <div className="detail-modal-album-header">
+                  <p className="detail-modal-audio-label">Album songs</p>
+                  <span className="detail-modal-album-last-played-header">Last played</span>
+                </div>
+                {albumTrackEntriesLoading ? (
+                  <p className="detail-modal-preview-missing">Loading album songs...</p>
+                ) : null}
+                {!albumTrackEntriesLoading && albumTrackEntriesError ? (
+                  <p className="detail-modal-preview-missing">{albumTrackEntriesError}</p>
+                ) : null}
+                {!albumTrackEntriesLoading && !albumTrackEntriesError && albumTrackEntries.length > 0 ? (
+                  <ul className="detail-album-track-list">
+                    {albumTrackEntries.map((track) => {
+                      const rowTrackUri = track.uri ?? (track.id ? `spotify:track:${track.id}` : null);
+                      const rowIsCurrentTrack = Boolean(rowTrackUri && currentTrack?.uri === rowTrackUri);
+                      const rowPlaying = isTrackPlaying(rowTrackUri);
+                      const rowLastPlayed = formatMonthDay(track.lastPlayedAt);
+                      const rowBaseDurationMs = (
+                        track.durationMs
+                        ?? (rowIsCurrentTrack
+                          ? (playbackDurationMs > 0 ? playbackDurationMs : currentTrack?.durationMs ?? null)
+                          : null)
+                      );
+                      const rowRemainingMs = rowIsCurrentTrack && rowBaseDurationMs != null
+                        ? Math.max(0, rowBaseDurationMs - Math.max(0, playbackPositionMs))
+                        : null;
+                      const rowButtonTimeMs = rowPlaying && rowRemainingMs != null ? rowRemainingMs : rowBaseDurationMs;
+                      return (
+                        <li className={`detail-album-track-row${track.isSelected ? " detail-album-track-row-selected" : ""}`} key={track.id ?? track.name}>
+                          {hasPremiumPlayback ? (
+                            <button
+                              aria-label={rowPlaying ? "Currently playing in ListenLab" : rowTrackUri ? `Play ${track.name} in ListenLab` : `${track.name} is not playable`}
+                              className={`secondary-button detail-album-track-play-button${rowPlaying ? " detail-icon-button-playing" : ""}`}
+                              disabled={!rowTrackUri}
+                              onClick={() => {
+                                void handleAlbumTrackPlay(track, rowTrackUri);
+                              }}
+                              type="button"
+                            >
+                              {rowPlaying ? (
+                                <span className="detail-wave-icon" aria-hidden="true">
+                                  <span />
+                                  <span />
+                                  <span />
+                                </span>
+                              ) : (
+                                <span className="detail-play-icon" aria-hidden="true">{"\u25B6"}</span>
+                              )}
+                              <span className="detail-album-track-play-time">{rowButtonTimeMs != null ? formatPlaybackClock(rowButtonTimeMs) : "?:??"}</span>
+                            </button>
+                          ) : null}
+                          <button
+                            className="detail-album-track-name-button single-line-ellipsis"
+                            onClick={() => openAlbumTrackPreview(track)}
+                            type="button"
+                          >
+                            {track.name}
+                          </button>
+                          <div className="detail-album-track-actions">
+                            {rowLastPlayed ? <span className="detail-album-track-last-played">{rowLastPlayed}</span> : <span className="detail-album-track-last-played">-</span>}
+                            {track.isTopTrack && !track.isSelected ? <span className="detail-album-track-star" aria-label="Other top track">*</span> : null}
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ) : null}
+              </div>
+            ) : null}
           </section>
         </div>
       ) : null}

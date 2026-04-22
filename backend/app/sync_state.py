@@ -21,6 +21,7 @@ from backend.app.play_event_projector import reconcile_fact_play_events_for_inge
 logger = logging.getLogger("listenlabs.sync")
 file_logger = logging.getLogger("listenlabs.sync.file")
 HEARTBEAT_INTERVAL_SECONDS = 15.0
+MIN_RECENT_OVERLAP_LOOKBACK_SECONDS = 24 * 60 * 60
 
 
 def _max_iso_utc_timestamp(a: str | None, b: str | None) -> str | None:
@@ -149,7 +150,20 @@ def get_spotify_recent_sync_start_point() -> dict[str, Any]:
     state = get_spotify_sync_state()
 
     last_successful_played_at = state["last_successful_played_at"]
-    overlap_lookback_seconds = int(state["overlap_lookback_seconds"])
+    configured_overlap_lookback_seconds = int(state["overlap_lookback_seconds"])
+    overlap_lookback_seconds = max(
+        configured_overlap_lookback_seconds,
+        MIN_RECENT_OVERLAP_LOOKBACK_SECONDS,
+    )
+    if overlap_lookback_seconds != configured_overlap_lookback_seconds:
+        # Keep the persisted setting in sync so diagnostics and future runs reflect
+        # the effective overlap window that protects against delayed API visibility.
+        patch_spotify_sync_state(overlap_lookback_seconds=overlap_lookback_seconds)
+        file_logger.info(
+            "event=spotify_recent_overlap_adjusted previous_seconds=%s effective_seconds=%s",
+            configured_overlap_lookback_seconds,
+            overlap_lookback_seconds,
+        )
 
     if last_successful_played_at is None:
         return {
@@ -221,6 +235,7 @@ def ingest_spotify_recent_rows(
     merged_duplicate_row_count = 0
     max_played_at: str | None = None
     min_played_at: str | None = None
+    row_outcomes: list[dict[str, Any]] = []
 
     canonical_projection_summary: dict[str, Any] | None = None
     raw_inserts_elapsed_ms = 0.0
@@ -293,6 +308,14 @@ def ingest_spotify_recent_rows(
                 duplicate_count += 1
                 if match_type == "source_row_key":
                     already_seen_source_row_count += 1
+                row_outcomes.append(
+                    {
+                        "source_row_key": source_row_key,
+                        "played_at": played_at,
+                        "outcome": "duplicate",
+                        "match_type": match_type,
+                    }
+                )
                 file_logger.debug(
                     "event=spotify_recent_row_result run_id=%s row_number=%s source_row_key=%s played_at=%s match_type=%s result=%s",
                     run_id,
@@ -304,6 +327,14 @@ def ingest_spotify_recent_rows(
                 )
             elif action == "merged_duplicate_row":
                 merged_duplicate_row_count += 1
+                row_outcomes.append(
+                    {
+                        "source_row_key": source_row_key,
+                        "played_at": played_at,
+                        "outcome": "duplicate",
+                        "match_type": match_type,
+                    }
+                )
                 file_logger.debug(
                     "event=spotify_recent_row_result run_id=%s row_number=%s source_row_key=%s played_at=%s match_type=%s result=%s raw_play_event_id=%s",
                     run_id,
@@ -316,6 +347,14 @@ def ingest_spotify_recent_rows(
                 )
             else:
                 inserted_count += 1
+                row_outcomes.append(
+                    {
+                        "source_row_key": source_row_key,
+                        "played_at": played_at,
+                        "outcome": "inserted",
+                        "match_type": match_type,
+                    }
+                )
                 file_logger.debug(
                     "event=spotify_recent_row_result run_id=%s row_number=%s source_row_key=%s played_at=%s match_type=%s result=%s raw_play_event_id=%s",
                     run_id,
@@ -398,6 +437,7 @@ def ingest_spotify_recent_rows(
         "earliest_played_at": min_played_at,
         "latest_played_at": max_played_at,
         "last_successful_played_at": max_played_at,
+        "row_outcomes": row_outcomes,
         "canonical_projection_summary": canonical_projection_summary,
     }
 

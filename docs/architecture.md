@@ -61,6 +61,8 @@ This document is the implementation-oriented technical source of truth for the L
 - frontend local/full/test mode controls with cached-state indicators
 - frontend tracks-only comparison page for current vs new all-time ranking formulas
 - frontend recent-ingest controls for connect+ingest, before-cursor probe, backfill probe, and post-track-end polling
+- frontend recent-debug page for grouped recent-play inspection plus DB-archive pagination
+- frontend track-detail overlay enhancements for album-song browsing, playback toggles, and same-album track switching without full overlay reset
 - backend OAuth endpoints
 - backend token exchange and session storage
 - backend encrypted Spotify token persistence and token-backed session restore
@@ -557,6 +559,7 @@ Fields:
 - The history-derived count for "Chronicles of a Diamond" is still incorrect and must be fixed before album rankings are considered reliable.
 - Local mode still loses too many artist and album images on some transitions, which means snapshot and static-cache hydration is incomplete.
 - Recent album lists for 4-week and 6-month views can still collapse to only one item for some accounts.
+- Phone offline/downloaded playlist playback can produce delayed or missing recently-played API rows, causing observed gaps in recent ingest windows.
 
 ### Two scoring paths
 #### Rich-signal path

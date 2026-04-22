@@ -22,6 +22,7 @@ from backend.app.config import get_settings
 from backend.app.db import (
     apply_pending_migrations,
     ensure_sqlite_db,
+    list_raw_spotify_recent_rows,
     list_spotify_auth_users,
     recover_stale_ingest_runs,
 )
@@ -80,6 +81,7 @@ STATIC_METADATA_MAX_ARTISTS = 4_000
 STATIC_METADATA_MAX_ALBUMS = 6_000
 STATIC_METADATA_MAX_TRACKS_BY_ID = 12_000
 STATIC_METADATA_MAX_TRACKS_BY_KEY = 12_000
+SPOTIFY_RECENT_MAX_ITEMS = 50
 
 STATIC_METADATA_CACHE: dict[str, Any] | None = None
 STATIC_METADATA_DIRTY_CONTENT = False
@@ -1078,7 +1080,7 @@ async def _fetch_recent_tracks(access_token: str, limit: int) -> tuple[list[dict
         payload = await _spotify_get(
             access_token,
             "https://api.spotify.com/v1/me/player/recently-played",
-            {"limit": min(50, max(limit * 4, limit))},
+            {"limit": min(SPOTIFY_RECENT_MAX_ITEMS, max(limit, 1))},
         )
     except HTTPException as exc:
         if exc.status_code == status.HTTP_403_FORBIDDEN:
@@ -1087,24 +1089,88 @@ async def _fetch_recent_tracks(access_token: str, limit: int) -> tuple[list[dict
 
     items = payload.get("items") or []
     results: list[dict[str, Any]] = []
-    seen_track_ids: set[str] = set()
 
     for item in items:
         track = item.get("track") or {}
-        track_id = track.get("id")
-        if not track_id:
+        if not isinstance(track, dict) or not track:
             continue
-        if track_id in seen_track_ids:
-            continue
+        context = item.get("context") or {}
+        album = track.get("album") or {}
         normalized = _normalize_track(track)
+        normalized["spotify_played_at"] = item.get("played_at")
+        if isinstance(item.get("played_at"), str):
+            try:
+                normalized["spotify_played_at_unix_ms"] = int(_parse_iso_utc(str(item["played_at"])).timestamp() * 1000)
+            except ValueError:
+                normalized["spotify_played_at_unix_ms"] = None
+        else:
+            normalized["spotify_played_at_unix_ms"] = None
+        normalized["spotify_context_type"] = (item.get("context") or {}).get("type")
+        normalized["spotify_context_uri"] = context.get("uri")
+        normalized["spotify_context_url"] = (context.get("external_urls") or {}).get("spotify")
+        normalized["spotify_context_href"] = context.get("href")
+        normalized["spotify_is_local"] = item.get("is_local")
+        normalized["spotify_track_type"] = track.get("type")
+        normalized["spotify_track_number"] = track.get("track_number")
+        normalized["spotify_disc_number"] = track.get("disc_number")
+        normalized["spotify_explicit"] = track.get("explicit")
+        normalized["spotify_popularity"] = track.get("popularity")
+        normalized["spotify_album_type"] = album.get("album_type")
+        normalized["spotify_album_total_tracks"] = album.get("total_tracks")
+        normalized["spotify_available_markets_count"] = len(track.get("available_markets") or [])
         _remember_track_metadata(normalized)
         results.append(normalized)
-        seen_track_ids.add(track_id)
         if len(results) >= limit:
             break
 
+    for index, track in enumerate(results):
+        duration_ms_raw = track.get("duration_ms")
+        duration_ms = int(duration_ms_raw) if isinstance(duration_ms_raw, (int, float)) and int(duration_ms_raw) > 0 else None
+        played_at = track.get("spotify_played_at")
+        gap_ms: int | None = None
+
+        if isinstance(played_at, str) and index + 1 < len(results):
+            older_played_at = results[index + 1].get("spotify_played_at")
+            if isinstance(older_played_at, str):
+                try:
+                    gap_ms_candidate = int((_parse_iso_utc(played_at) - _parse_iso_utc(older_played_at)).total_seconds() * 1000)
+                    if gap_ms_candidate > 0:
+                        gap_ms = gap_ms_candidate
+                except ValueError:
+                    gap_ms = None
+
+        estimated_played_ms: int | None = duration_ms
+        if gap_ms is not None and duration_ms is not None:
+            estimated_played_ms = min(duration_ms, gap_ms)
+        elif gap_ms is not None and duration_ms is None:
+            estimated_played_ms = gap_ms
+
+        track["played_at_gap_ms"] = gap_ms
+        track["estimated_played_ms"] = estimated_played_ms
+        track["estimated_played_seconds"] = round(estimated_played_ms / 1000.0, 3) if estimated_played_ms is not None else None
+        track["estimated_completion_ratio"] = (
+            round(min(1.0, estimated_played_ms / duration_ms), 4)
+            if estimated_played_ms is not None and duration_ms is not None and duration_ms > 0
+            else None
+        )
+
     _save_static_metadata_cache(_load_static_metadata_cache())
     return results, True
+
+
+async def _sync_recent_to_db_best_effort(access_token: str, source_ref: str) -> None:
+    try:
+        await sync_spotify_recent_plays(
+            access_token,
+            source_ref=source_ref,
+            limit=50,
+        )
+    except Exception as exc:
+        logger.warning(
+            "event=recent_db_sync_failed source_ref=%s error=%s",
+            source_ref,
+            exc,
+        )
 
 
 async def _fetch_owned_playlists(
@@ -1274,12 +1340,16 @@ def _normalize_track(track: dict[str, Any]) -> dict[str, Any]:
     external_urls = track.get("external_urls") or {}
     album_external_urls = album.get("external_urls") or {}
     release_date = album.get("release_date")
+    duration_ms_raw = track.get("duration_ms")
+    duration_ms = int(duration_ms_raw) if isinstance(duration_ms_raw, (int, float)) and int(duration_ms_raw) > 0 else None
     return {
         "track_id": track.get("id"),
         "track_name": track.get("name"),
         "artist_name": ", ".join(artist.get("name", "") for artist in artists if artist.get("name")),
         "album_name": album.get("name"),
         "album_release_year": str(release_date)[:4] if release_date else None,
+        "duration_ms": duration_ms,
+        "duration_seconds": round(duration_ms / 1000.0, 3) if duration_ms is not None else None,
         "uri": track.get("uri"),
         "preview_url": track.get("preview_url"),
         "url": external_urls.get("spotify"),
@@ -3360,6 +3430,68 @@ async def auth_recent_ingest_probe_backfill(
     }
 
 
+@app.get("/auth/recent-ingest/debug-items")
+async def auth_recent_ingest_debug_items(
+    request: Request,
+    limit: int = 50,
+) -> dict[str, Any]:
+    bounded_limit = max(1, min(limit, 50))
+    token_source = "token_store"
+    token = _require_token(request)
+
+    try:
+        page = await fetch_spotify_recent_play_page(
+            str(token),
+            # Intentionally no cutoff for debugging missing-play visibility.
+            after_played_at=None,
+            before_cursor=None,
+            limit=bounded_limit,
+        )
+    except RuntimeError as exc:
+        detail = str(exc)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+    items = page.get("items") or []
+    debug_items: list[dict[str, Any]] = []
+    played_values: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        played_at = item.get("played_at")
+        track = item.get("track") if isinstance(item.get("track"), dict) else {}
+        context = item.get("context") if isinstance(item.get("context"), dict) else {}
+        artists_payload = track.get("artists") if isinstance(track.get("artists"), list) else []
+        artist_names = [
+            str(artist.get("name"))
+            for artist in artists_payload
+            if isinstance(artist, dict) and artist.get("name")
+        ]
+        if played_at is not None:
+            played_values.append(str(played_at))
+        debug_items.append(
+            {
+                "played_at": played_at,
+                "track_name": track.get("name"),
+                "artist_names": artist_names,
+                "spotify_track_id": track.get("id"),
+                "spotify_track_uri": track.get("uri"),
+                "context_type": context.get("type"),
+                "context_uri": context.get("uri"),
+            }
+        )
+
+    played_values.sort()
+    return {
+        "ok": True,
+        "token_source": token_source,
+        "limit": bounded_limit,
+        "returned_items": len(debug_items),
+        "earliest_played_at": played_values[0] if played_values else None,
+        "latest_played_at": played_values[-1] if played_values else None,
+        "items": debug_items,
+    }
+
+
 @app.get("/auth/session")
 async def auth_session(request: Request) -> dict[str, Any]:
     user_id = _session_user_id(request) or _restore_session_user_from_token_store(request)
@@ -3706,7 +3838,8 @@ async def me_recent(
 
         try:
             _set_load_progress(request, "recent listening")
-            recent_tracks, recent_tracks_available = await _fetch_recent_tracks(token, item_limit)
+            recent_tracks, recent_tracks_available = await _fetch_recent_tracks(token, SPOTIFY_RECENT_MAX_ITEMS)
+            await _sync_recent_to_db_best_effort(token, source_ref="me_recent_refresh")
 
             _set_load_progress(request, "liked tracks")
             recent_likes_tracks, recent_likes_available = await _fetch_recent_liked_tracks(token, item_limit)
@@ -3787,6 +3920,117 @@ async def me_recent(
         return payload
     finally:
         _clear_load_progress(request)
+
+
+@app.get("/me/recent/archive")
+async def me_recent_archive(
+    request: Request,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    _require_token(request)
+    bounded_limit = max(1, min(int(limit), 200))
+    bounded_offset = max(0, int(offset))
+
+    rows = list_raw_spotify_recent_rows(limit=bounded_limit + 1, offset=bounded_offset)
+    has_more = len(rows) > bounded_limit
+    rows = rows[:bounded_limit]
+
+    tracks: list[dict[str, Any]] = []
+    for row in rows:
+        payload_obj: dict[str, Any] = {}
+        try:
+            payload_value = row.get("raw_payload_json")
+            if isinstance(payload_value, str) and payload_value:
+                parsed_payload = json.loads(payload_value)
+                if isinstance(parsed_payload, dict):
+                    payload_obj = parsed_payload
+        except ValueError:
+            payload_obj = {}
+
+        track_payload = payload_obj.get("track") if isinstance(payload_obj.get("track"), dict) else {}
+        album_payload = track_payload.get("album") if isinstance(track_payload.get("album"), dict) else {}
+        context_payload = payload_obj.get("context") if isinstance(payload_obj.get("context"), dict) else {}
+        artists_payload = track_payload.get("artists") if isinstance(track_payload.get("artists"), list) else []
+        artists: list[dict[str, Any]] = []
+        for artist in artists_payload:
+            if not isinstance(artist, dict):
+                continue
+            artist_name = artist.get("name")
+            if not artist_name:
+                continue
+            artists.append({"artist_id": artist.get("id"), "name": artist_name})
+
+        release_date = album_payload.get("release_date")
+        duration_ms_raw = row.get("track_duration_ms")
+        duration_ms = int(duration_ms_raw) if isinstance(duration_ms_raw, (int, float)) else None
+        estimated_played_ms_raw = row.get("ms_played_estimate")
+        estimated_played_ms = (
+            int(estimated_played_ms_raw)
+            if isinstance(estimated_played_ms_raw, (int, float))
+            else None
+        )
+
+        track_entry: dict[str, Any] = {
+            "track_id": row.get("spotify_track_id"),
+            "track_name": row.get("track_name_raw"),
+            "artist_name": row.get("artist_name_raw"),
+            "album_name": row.get("album_name_raw"),
+            "album_release_year": str(release_date)[:4] if release_date else None,
+            "duration_ms": duration_ms,
+            "duration_seconds": round(duration_ms / 1000.0, 3) if isinstance(duration_ms, int) and duration_ms >= 0 else None,
+            "uri": row.get("spotify_track_uri"),
+            "preview_url": track_payload.get("preview_url"),
+            "url": (track_payload.get("external_urls") or {}).get("spotify"),
+            "album_url": (album_payload.get("external_urls") or {}).get("spotify"),
+            "image_url": ((album_payload.get("images") or [{}])[0]).get("url"),
+            "album_id": row.get("spotify_album_id"),
+            "artists": artists,
+            "spotify_played_at": row.get("played_at"),
+            "spotify_played_at_unix_ms": row.get("played_at_unix_ms"),
+            "spotify_context_type": row.get("context_type"),
+            "spotify_context_uri": row.get("context_uri"),
+            "spotify_context_url": (context_payload.get("external_urls") or {}).get("spotify"),
+            "spotify_context_href": context_payload.get("href"),
+            "spotify_is_local": payload_obj.get("is_local"),
+            "spotify_track_type": track_payload.get("type"),
+            "spotify_track_number": track_payload.get("track_number"),
+            "spotify_disc_number": track_payload.get("disc_number"),
+            "spotify_explicit": track_payload.get("explicit"),
+            "spotify_popularity": track_payload.get("popularity"),
+            "spotify_album_type": album_payload.get("album_type"),
+            "spotify_album_total_tracks": album_payload.get("total_tracks"),
+            "spotify_available_markets_count": len(track_payload.get("available_markets") or []),
+            "estimated_played_ms": estimated_played_ms,
+            "estimated_played_seconds": round(estimated_played_ms / 1000.0, 3) if isinstance(estimated_played_ms, int) and estimated_played_ms >= 0 else None,
+            "estimated_completion_ratio": (
+                round(min(1.0, estimated_played_ms / duration_ms), 4)
+                if isinstance(estimated_played_ms, int) and isinstance(duration_ms, int) and duration_ms > 0
+                else None
+            ),
+        }
+        tracks.append(track_entry)
+
+    for index, track in enumerate(tracks):
+        played_at = track.get("spotify_played_at")
+        gap_ms: int | None = None
+        if isinstance(played_at, str) and index + 1 < len(tracks):
+            older_played_at = tracks[index + 1].get("spotify_played_at")
+            if isinstance(older_played_at, str):
+                try:
+                    gap_ms_candidate = int((_parse_iso_utc(played_at) - _parse_iso_utc(older_played_at)).total_seconds() * 1000)
+                    if gap_ms_candidate > 0:
+                        gap_ms = gap_ms_candidate
+                except ValueError:
+                    gap_ms = None
+        track["played_at_gap_ms"] = gap_ms
+
+    return {
+        "items": tracks,
+        "has_more": has_more,
+        "limit": bounded_limit,
+        "offset": bounded_offset,
+    }
 
 
 @app.get("/me")
@@ -3997,7 +4241,8 @@ async def me(
 
         if is_full_analysis:
             _set_load_progress(request, "recent listening")
-            recent_tracks, recent_tracks_available = await _fetch_recent_tracks(token, item_limit)
+            recent_tracks, recent_tracks_available = await _fetch_recent_tracks(token, SPOTIFY_RECENT_MAX_ITEMS)
+            await _sync_recent_to_db_best_effort(token, source_ref="me_profile_refresh")
         else:
             recent_tracks, recent_tracks_available = [], False
         cached_playlists = _get_short_cache("owned_playlists", user_id, playlist_cache_limit)

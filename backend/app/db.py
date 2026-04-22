@@ -1953,6 +1953,45 @@ def list_raw_play_events(limit: int = 50) -> list[dict[str, Any]]:
     return list_canonical_play_events(limit=limit)
 
 
+def list_raw_spotify_recent_rows(*, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+    bounded_limit = max(1, int(limit))
+    bounded_offset = max(0, int(offset))
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        rows = connection.execute(
+            """
+            SELECT
+              id,
+              ingest_run_id,
+              source_row_key,
+              source_event_id,
+              played_at,
+              played_at_unix_ms,
+              spotify_track_id,
+              spotify_track_uri,
+              spotify_album_id,
+              spotify_artist_ids_json,
+              track_name_raw,
+              artist_name_raw,
+              album_name_raw,
+              track_duration_ms,
+              ms_played_estimate,
+              ms_played_method,
+              ms_played_confidence,
+              ms_played_fallback_class,
+              context_type,
+              context_uri,
+              raw_payload_json,
+              inserted_at
+            FROM raw_spotify_recent
+            ORDER BY played_at DESC, id DESC
+            LIMIT ?
+            OFFSET ?
+            """,
+            (bounded_limit, bounded_offset),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def list_unified_top_tracks(
     *,
     limit: int = 50,

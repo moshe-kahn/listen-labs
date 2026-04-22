@@ -125,6 +125,14 @@ async def poll_recent_for_user(user_id: str) -> dict[str, Any]:
         "merged_duplicate_row_count": int(summary.get("merged_duplicate_row_count") or 0),
         "earliest_played_at": summary.get("earliest_played_at"),
         "latest_played_at": summary.get("latest_played_at"),
+        "poll_started_at": summary.get("poll_started_at"),
+        "saved_watermark_before_run": summary.get("saved_watermark_before_run"),
+        "computed_after": summary.get("computed_after"),
+        "api_oldest_played_at": summary.get("api_oldest_played_at"),
+        "api_newest_played_at": summary.get("api_newest_played_at"),
+        "collection_outcomes": summary.get("collection_outcomes") or {},
+        "item_decisions": summary.get("item_decisions") or [],
+        "row_outcomes": summary.get("row_outcomes") or [],
     }
 
 

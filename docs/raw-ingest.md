@@ -449,6 +449,7 @@ This is only a narrow sample, not a full-history benchmark.
 - live playback observations are not yet promoted directly to canonical plays
 - full-history import benchmarking still needs a controlled larger sample after the migration recovery and transaction refactor
 - real history/API overlap validation is still pending on a dataset with substantial real `spotify_recent` rows; exact end-time equality has not yet been validated on real overlapping data and should be revisited after a fresh overlap-producing ingest
+- Spotify recently-played capture is still constrained by Spotify API visibility; downloaded/offline playlist phone playback may sync late or incompletely, so real listening windows can be absent from `raw_spotify_recent` even when polling runs succeed
 
 ## Live Playback + Durable Ingest Boundary
 - `live_playback_event` is observational evidence, not canonical play history

@@ -23,6 +23,7 @@ class Settings:
     spotify_history_dir: str
     cache_dir: str
     sqlite_db_path: str
+    spotify_recent_full_page_mode: bool = True
     spotify_scope: str = (
         "user-read-email user-read-private user-read-recently-played playlist-read-private "
         "user-follow-read user-library-read user-top-read streaming user-modify-playback-state "
@@ -44,6 +45,18 @@ class Settings:
 
 def _read_env(name: str, default: str = "") -> str:
     return os.getenv(name, default).strip()
+
+
+def _read_env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return bool(default)
+    normalized = str(raw).strip().lower()
+    if normalized in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    return bool(default)
 
 
 def get_settings() -> Settings:
@@ -71,4 +84,5 @@ def get_settings() -> Settings:
         ),
         cache_dir=_read_env("CACHE_DIR", str(BACKEND_DIR / "data" / "cache")),
         sqlite_db_path=_read_env("SQLITE_DB_PATH", str(BACKEND_DIR / "data" / "listenlabs.sqlite3")),
+        spotify_recent_full_page_mode=_read_env_bool("SPOTIFY_RECENT_FULL_PAGE_MODE", True),
     )
