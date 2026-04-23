@@ -72,6 +72,7 @@ ListenLab is built around **"signal over suggestion"**:
 - [Raw Ingest](docs/raw-ingest.md)
 - [Formula Calibration](docs/formula-calibration.md)
 - [Auth Milestone Notes](docs/auth-milestone.md)
+- [Track Section Migration](docs/track-section-migration.md)
 
 ---
 
