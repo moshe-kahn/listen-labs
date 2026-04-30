@@ -176,8 +176,8 @@ The MVP succeeds when:
 - Fix the incorrect track count still shown for "Chronicles of a Diamond."
 - Improve local-mode image persistence and hydration so artist and album artwork survives mode switches more reliably.
 - Improve recent album ranking so 4-week and 6-month windows do not collapse to overly sparse results.
-- Use the new track-formula comparison page, live-playback observations, and raw-data validation scripts to tighten ranking confidence before broader product expansion.
+- Use the Tracks page as the track-level formula comparison surface: canonical track rows/cards, side-by-side ranking formulas, and aggregate play metrics rather than event/session inspection.
 - Decide how canonical Spotify-backed winner selection should work when multiple `source_track` rows are merged into one `release_track`.
 - Review the ambiguous track-variant queue and tighten policy family-by-family instead of adding more hardcoded title rules.
-- Decide whether the half-finished `tracksOnly` merged-track page should be stabilized or replaced by the newer `Listening Log` direction as the primary inspection surface.
+- Keep Listening Log event-oriented: timestamps, source provenance, sessions, merge details, and recent play inspection.
 - Continue improving the merged-event `Listening Log` page now that it reads from `v_fact_play_event_with_sources` and supports `All`, `API`, `History`, and `Both`.

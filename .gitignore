@@ -4,6 +4,7 @@ venv/
 __pycache__/
 *.pyc
 .env
+.envrc
 backend/.env
 frontend/.env
 .env.local
@@ -21,6 +22,7 @@ backend/data/*.sqlite3-*
 backend/data/listenlabs.pre_*
 backend/data/*.copy
 backend/data/*.copy-*
+backend/tests/*.sqlite3
 backend/scripts/__pycache__/
 
 # VS Code

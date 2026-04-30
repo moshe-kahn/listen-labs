@@ -9,7 +9,7 @@ from pathlib import Path
 from backend.app.config import BACKEND_DIR
 
 
-POLICY_PATH = BACKEND_DIR.parent / "docs" / "track-variant-policy.json"
+POLICY_PATH = BACKEND_DIR.parent / "docs" / "config" / "track-variant-policy.json"
 
 
 @dataclass(frozen=True)

@@ -91,6 +91,32 @@ This document is the implementation-oriented technical source of truth for the L
 7. A later milestone will add `POST /analysis` and `POST /playlist`.
 
 ## Raw Ingest Architecture
+### Album entity layers
+- `source_album`
+  - provider-specific album identity (for example one Spotify album ID)
+- `release_album`
+  - concrete internal release-level album identity used by current display/query layers
+- `album_family`
+  - conceptual family identity spanning related releases/variants
+
+Current mapping direction:
+- many `source_album` -> one `release_album`
+- one `release_album` -> one `album_family` (v1 bootstrap)
+
+Current v1 constraints:
+- `album_family` currently bootstraps as one family per existing release album
+- `album_family_map` enforces one family per release album
+- no deluxe/remaster/expanded grouping heuristics yet
+- no `album_relationship` table yet
+
+Album-family candidate report review:
+- Run `./.venv/bin/python backend/scripts/run_album_family_candidate_report.py`
+- The script prints the generated report path and writes a text artifact under `backend/data/logs/` named like `album_family_grouping_candidates_<timestamp>.txt`
+- Output is `suggested_only`: candidate groups are report artifacts for manual review
+- Candidates are not applied automatically
+- There is no promotion/apply flow yet
+- Review policy and manual-process criteria are defined in `docs/reference/album-family-review-policy.md`
+
 ### Current raw tables
 - `ingest_run`
   - records run lifecycle, row counts, inserted counts, duplicate counts, and error counts

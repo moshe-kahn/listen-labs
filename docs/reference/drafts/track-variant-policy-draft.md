@@ -5,7 +5,7 @@ This draft now uses a numeric confidence model instead of a purely binary
 
 The source-of-truth machine-readable config lives in:
 
-- [track-variant-policy.json](/C:/Users/kahnt/Projects/ListenLab/ListenLab%20Project/docs/track-variant-policy.json)
+- [track-variant-policy.json](../../config/track-variant-policy.json)
 
 Interpretation:
 

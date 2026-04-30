@@ -44,6 +44,118 @@ The same pattern applies to albums:
   - often different display album
   - sometimes same analysis album
 
+## Current Implementation Notes
+
+The current implementation has three important identity layers:
+- provider/source identity: `source_*` tables and source map tables
+- release/display identity: `release_album` and `release_track`
+- analysis/grouping identity: `analysis_track` and album-family tables
+
+Current album membership is represented through `album_track`.
+
+Important schema point:
+- `release_track` does not have a `release_album_id`.
+- Album merge or repair work must move `album_track.release_album_id`.
+- Album merge or repair work must not directly rewrite `release_track` rows.
+
+Current artist representation is mixed:
+- raw artist text exists on raw/source rows
+- Spotify catalog tables store structured artist arrays as JSON
+- normalized artist rows exist in `artist`
+- album and track artists connect through `album_artist` and `track_artist`
+
+Fallback/history text paths previously used raw artist strings in stable keys. This could split identities such as:
+- `Telekinesis`
+- `Telekinesis, Telekinesis`
+
+Future fallback key creation now normalizes only fallback/history artist text through `_normalize_fallback_artist_text(...)`.
+
+That normalization:
+- is used for `history_raw_artist`, `history_raw_album`, and `history_raw_track` keys
+- picks a canonical primary token from comma-delimited artist text
+- preserves original raw artist text for display/raw fields
+- does not affect Spotify-ID provider identity paths
+- does not repair existing rows
+
+## Release Duplicate Diagnostics
+
+Current read-only diagnostics include:
+- duplicate release albums by same resolved Spotify album ID
+- duplicate release albums by normalized album name + normalized primary artist
+- duplicate release tracks by same resolved Spotify track ID
+
+The Spotify-ID diagnostics are stronger evidence because Spotify ID is the highest-confidence identity signal.
+
+The name + primary artist diagnostic is weaker but catches fallback/text duplicates when Spotify IDs differ or are missing.
+
+These diagnostics are read-only:
+- no Spotify API calls
+- no writes
+- no mapping mutation
+- no merge behavior
+
+## Release Album Merge Preview And Dry Run
+
+Current read-only endpoints:
+- `POST /debug/identity/release-albums/merge-preview`
+- `POST /debug/identity/release-albums/merge-dry-run`
+
+Preview chooses a deterministic survivor:
+- accepted/direct Spotify `source_album_map`
+- Spotify catalog match
+- most associated tracks/listens
+- lowest `release_album_id`
+
+Preview returns:
+- survivor recommendation
+- duplicate album IDs
+- warnings
+- affected counts
+- proposed operations
+- `merge_readiness`
+- `readiness_reasons`
+
+Readiness values:
+- `safe_candidate`
+- `needs_review`
+- `unsafe`
+
+Unsafe cases:
+- missing requested IDs
+- different normalized album names
+- different normalized primary artists
+
+Needs-review cases:
+- multiple distinct Spotify album IDs
+- album-track conflicts
+- no strong single Spotify evidence
+
+`album_track_conflicts` means duplicate album-track rows would collide on:
+- survivor `release_album_id`
+- same `release_track_id`
+
+Dry run:
+- reuses preview/readiness
+- blocks `unsafe`
+- blocks survivor mismatch
+- allows `safe_candidate` and `needs_review`
+- returns exact row-level plans for:
+  - `source_album_map` repoints
+  - `album_artist` inserts/deletes/dedupes
+  - `album_track` repoints
+  - `album_track` conflicts
+  - release albums that would be retired later
+
+There is no apply/merge endpoint yet.
+
+Any future apply path should:
+- start with `safe_candidate` only
+- run in one transaction
+- be idempotent
+- return explicit `rows_affected`
+- prove `release_track` rows are not changed directly
+- prove `analysis_track_map` is not mutated
+
 ## Proposed Identity Layers
 
 ### Artists

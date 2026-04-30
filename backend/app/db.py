@@ -1027,6 +1027,204 @@ ALTER TABLE ingest_run ADD COLUMN downstream_pipeline_ms REAL;
 ALTER TABLE ingest_run ADD COLUMN final_commit_ms REAL;
 ALTER TABLE ingest_run ADD COLUMN total_duration_ms REAL;
 """,
+    17: """
+CREATE TABLE IF NOT EXISTS album_family (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  primary_name TEXT NOT NULL,
+  normalized_name TEXT,
+  release_year INTEGER,
+  canonical_release_album_id INTEGER REFERENCES release_album(id),
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+CREATE TABLE IF NOT EXISTS album_family_map (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  release_album_id INTEGER NOT NULL REFERENCES release_album(id),
+  album_family_id INTEGER NOT NULL REFERENCES album_family(id),
+  match_method TEXT NOT NULL,
+  confidence REAL NOT NULL,
+  status TEXT NOT NULL,
+  is_user_confirmed INTEGER NOT NULL DEFAULT 0,
+  explanation TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE(release_album_id),
+  UNIQUE(release_album_id, album_family_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_album_family_canonical_release_album_id
+  ON album_family(canonical_release_album_id);
+
+CREATE INDEX IF NOT EXISTS idx_album_family_map_release_album_id
+  ON album_family_map(release_album_id);
+
+CREATE INDEX IF NOT EXISTS idx_album_family_map_album_family_id
+  ON album_family_map(album_family_id);
+
+INSERT OR IGNORE INTO album_family (
+  id,
+  primary_name,
+  normalized_name,
+  release_year,
+  canonical_release_album_id,
+  created_at,
+  updated_at
+)
+SELECT
+  ra.id,
+  COALESCE(ra.primary_name, ''),
+  ra.normalized_name,
+  ra.release_year,
+  ra.id,
+  ra.created_at,
+  ra.updated_at
+FROM release_album ra;
+
+INSERT OR IGNORE INTO album_family_map (
+  release_album_id,
+  album_family_id,
+  match_method,
+  confidence,
+  status,
+  is_user_confirmed,
+  explanation,
+  created_at,
+  updated_at
+)
+SELECT
+  ra.id,
+  ra.id,
+  'release_album_identity_backfill',
+  1.0,
+  'accepted',
+  0,
+  'initial one-to-one album family bootstrap',
+  ra.created_at,
+  ra.updated_at
+FROM release_album ra;
+""",
+    18: """
+CREATE TABLE IF NOT EXISTS identity_audit_submission (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  validation_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'saved',
+  promoted_at TEXT,
+  notes TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_identity_audit_submission_created_at
+  ON identity_audit_submission(created_at);
+""",
+    19: """
+CREATE TABLE IF NOT EXISTS spotify_track_catalog (
+  spotify_track_id TEXT PRIMARY KEY,
+  name TEXT,
+  duration_ms INTEGER,
+  explicit INTEGER,
+  disc_number INTEGER,
+  track_number INTEGER,
+  album_id TEXT,
+  artists_json TEXT,
+  raw_json TEXT,
+  market TEXT,
+  fetched_at TEXT NOT NULL,
+  last_status TEXT,
+  last_error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS spotify_album_catalog (
+  spotify_album_id TEXT PRIMARY KEY,
+  name TEXT,
+  album_type TEXT,
+  release_date TEXT,
+  release_date_precision TEXT,
+  total_tracks INTEGER,
+  artists_json TEXT,
+  images_json TEXT,
+  raw_json TEXT,
+  market TEXT,
+  fetched_at TEXT NOT NULL,
+  last_status TEXT,
+  last_error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS spotify_album_track (
+  spotify_album_id TEXT NOT NULL,
+  spotify_track_id TEXT NOT NULL,
+  disc_number INTEGER,
+  track_number INTEGER,
+  name TEXT,
+  duration_ms INTEGER,
+  artists_json TEXT,
+  raw_json TEXT,
+  market TEXT,
+  fetched_at TEXT NOT NULL,
+  last_status TEXT,
+  last_error TEXT,
+  PRIMARY KEY (spotify_album_id, spotify_track_id)
+);
+
+CREATE TABLE IF NOT EXISTS spotify_catalog_backfill_run (
+  id INTEGER PRIMARY KEY,
+  started_at TEXT NOT NULL,
+  completed_at TEXT,
+  market TEXT,
+  status TEXT,
+  tracks_seen INTEGER,
+  tracks_fetched INTEGER,
+  tracks_upserted INTEGER,
+  albums_seen INTEGER,
+  albums_fetched INTEGER,
+  album_tracks_upserted INTEGER,
+  skipped INTEGER,
+  errors INTEGER,
+  requests_total INTEGER,
+  requests_success INTEGER,
+  requests_429 INTEGER,
+  requests_failed INTEGER,
+  initial_request_delay_seconds REAL,
+  final_request_delay_seconds REAL,
+  effective_requests_per_minute REAL,
+  peak_requests_last_30_seconds INTEGER,
+  max_retry_after_seconds REAL,
+  has_more INTEGER,
+  last_error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_spotify_track_catalog_album_id
+  ON spotify_track_catalog(album_id);
+
+CREATE INDEX IF NOT EXISTS idx_spotify_album_track_album_id
+  ON spotify_album_track(spotify_album_id);
+
+CREATE INDEX IF NOT EXISTS idx_spotify_catalog_backfill_run_started_at
+  ON spotify_catalog_backfill_run(started_at DESC);
+""",
+    20: """
+ALTER TABLE spotify_catalog_backfill_run
+ADD COLUMN warnings_json TEXT;
+""",
+    21: """
+CREATE TABLE IF NOT EXISTS spotify_catalog_backfill_queue (
+  id INTEGER PRIMARY KEY,
+  entity_type TEXT NOT NULL,
+  spotify_id TEXT NOT NULL,
+  reason TEXT,
+  priority INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending',
+  requested_at TEXT NOT NULL,
+  last_attempted_at TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  UNIQUE(entity_type, spotify_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_spotify_catalog_backfill_queue_status_priority
+  ON spotify_catalog_backfill_queue(status, priority DESC, requested_at ASC);
+""",
 }
 
 
@@ -2066,6 +2264,297 @@ def list_unified_top_tracks(
         return [dict(row) for row in rows]
 
 
+def get_effective_album_family_id(release_album_id: int) -> int | None:
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        row = connection.execute(
+            """
+            SELECT
+              ra.id AS release_album_id,
+              COALESCE(afm.album_family_id, ra.id) AS effective_album_family_id
+            FROM release_album ra
+            LEFT JOIN album_family_map afm
+              ON afm.release_album_id = ra.id
+            WHERE ra.id = ?
+            LIMIT 1
+            """,
+            (release_album_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return int(row["effective_album_family_id"])
+
+
+_ALBUM_FAMILY_SUFFIX_PATTERN = re.compile(
+    r"\b(deluxe|edition|remaster(?:ed)?|expanded|anniversary|special|bonus)\b"
+)
+_ALBUM_FAMILY_SUFFIX_SIGNAL_PATTERN = re.compile(
+    r"\b("
+    r"deluxe|expanded|remaster(?:ed)?|anniversary(?:\s+edition)?|bonus\s+track\s+version|"
+    r"explicit|clean|regional\s+version"
+    r")\b"
+)
+_COMPILATION_RISK_PATTERN = re.compile(r"\b(compilation|greatest hits|best of)\b")
+_SOUNDTRACK_RISK_PATTERN = re.compile(r"\b(soundtrack|score|ost)\b")
+
+
+def _album_family_anchor_key(album_name: str | None) -> str | None:
+    normalized = _normalize_name(album_name)
+    if not normalized:
+        return None
+    parts = [part for part in normalized.split() if not _ALBUM_FAMILY_SUFFIX_PATTERN.search(part)]
+    if not parts:
+        return normalized
+    return " ".join(parts)
+
+
+def _extract_album_family_suffix_signals(album_name: str | None) -> list[str]:
+    normalized = _normalize_name(album_name) or ""
+    if not normalized:
+        return []
+    found = _ALBUM_FAMILY_SUFFIX_SIGNAL_PATTERN.findall(normalized)
+    deduped = sorted({str(token).strip() for token in found if str(token).strip()})
+    return deduped
+
+
+def query_album_family_grouping_candidates(
+    *,
+    limit: int = 200,
+    offset: int = 0,
+) -> dict[str, Any]:
+    bounded_limit = max(1, min(int(limit), 500))
+    bounded_offset = max(0, int(offset))
+
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        rows = connection.execute(
+            """
+            WITH primary_artists AS (
+              SELECT
+                ordered.release_album_id,
+                group_concat(ordered.artist_name, ' | ') AS artist_signature,
+                group_concat(CAST(ordered.artist_id AS TEXT), ' | ') AS artist_id_signature
+              FROM (
+                SELECT
+                  aa.release_album_id,
+                  aa.artist_id,
+                  a.canonical_name AS artist_name
+                FROM album_artist aa
+                JOIN artist a ON a.id = aa.artist_id
+                WHERE aa.role = 'primary'
+                ORDER BY aa.release_album_id, COALESCE(aa.billing_index, 999999), aa.id, a.canonical_name
+              ) ordered
+              GROUP BY ordered.release_album_id
+            ),
+            track_counts AS (
+              SELECT
+                at.release_album_id,
+                count(DISTINCT at.release_track_id) AS track_count
+              FROM album_track at
+              GROUP BY at.release_album_id
+            )
+            SELECT
+              ra.id AS release_album_id,
+              ra.primary_name,
+              ra.normalized_name,
+              ra.release_year,
+              COALESCE(pa.artist_signature, '') AS primary_artist_signature,
+              COALESCE(pa.artist_id_signature, '') AS primary_artist_id_signature,
+              COALESCE(tc.track_count, 0) AS track_count,
+              COALESCE(afm.album_family_id, ra.id) AS effective_album_family_id
+            FROM release_album ra
+            LEFT JOIN primary_artists pa
+              ON pa.release_album_id = ra.id
+            LEFT JOIN track_counts tc
+              ON tc.release_album_id = ra.id
+            LEFT JOIN album_family_map afm
+              ON afm.release_album_id = ra.id
+            ORDER BY ra.id ASC
+            """
+        ).fetchall()
+
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        release_album_id = int(row["release_album_id"])
+        primary_name = str(row["primary_name"] or "")
+        if not primary_name:
+            continue
+        anchor_key = _album_family_anchor_key(primary_name)
+        if not anchor_key:
+            continue
+        artist_signature = str(row["primary_artist_signature"] or "").strip().lower()
+        group_key = (anchor_key, artist_signature)
+        grouped.setdefault(group_key, []).append(
+            {
+                "release_album_id": release_album_id,
+                "primary_name": primary_name,
+                "normalized_name": str(row["normalized_name"] or ""),
+                "release_year": int(row["release_year"]) if row["release_year"] is not None else None,
+                "primary_artist_signature": str(row["primary_artist_signature"] or ""),
+                "primary_artist_id_signature": str(row["primary_artist_id_signature"] or ""),
+                "track_count": int(row["track_count"] or 0),
+                "effective_album_family_id": int(row["effective_album_family_id"]),
+            }
+        )
+
+    candidate_items: list[dict[str, Any]] = []
+    for (anchor_key, artist_signature), albums in grouped.items():
+        if len(albums) < 2:
+            continue
+        distinct_families = {int(item["effective_album_family_id"]) for item in albums}
+        if len(distinct_families) < 2:
+            continue
+        release_years = [item["release_year"] for item in albums]
+        known_release_years = [int(year) for year in release_years if year is not None]
+        year_gap = (max(known_release_years) - min(known_release_years)) if known_release_years else None
+
+        artist_signatures = {
+            str(item["primary_artist_signature"]).strip().lower()
+            for item in albums
+            if str(item["primary_artist_signature"]).strip()
+        }
+        artist_ids = sorted(
+            {
+                token.strip()
+                for item in albums
+                for token in str(item["primary_artist_id_signature"]).split("|")
+                if token.strip()
+            }
+        )
+        artist_names = sorted(
+            {
+                token.strip()
+                for item in albums
+                for token in str(item["primary_artist_signature"]).split("|")
+                if token.strip()
+            }
+        )
+        artist_match_signal = (
+            "same_primary_artist_signature"
+            if len(artist_signatures) == 1 and artist_signatures
+            else ("different_primary_artist_signatures" if len(artist_signatures) > 1 else "missing_artist_evidence")
+        )
+        year_proximity_signal = (
+            "missing_year_evidence"
+            if year_gap is None
+            else ("close_years" if year_gap <= 2 else ("moderate_year_gap" if year_gap <= 5 else "large_year_gap"))
+        )
+
+        suffix_signals = sorted(
+            {
+                token
+                for item in albums
+                for token in _extract_album_family_suffix_signals(str(item["primary_name"] or ""))
+            }
+        )
+        suffix_version_signal = ",".join(suffix_signals) if suffix_signals else ""
+
+        title_similarity_score = 1.0 if anchor_key else 0.0
+        title_match_reason = "shared_anchor_key" if anchor_key else ""
+        warning_flags: list[str] = []
+        if artist_match_signal == "different_primary_artist_signatures":
+            warning_flags.append("different_artist")
+        if year_proximity_signal == "large_year_gap":
+            warning_flags.append("large_year_gap")
+        if title_similarity_score < 0.75:
+            warning_flags.append("weak_title_match")
+        if all(int(item.get("track_count") or 0) <= 0 for item in albums):
+            warning_flags.append("missing_track_evidence")
+        normalized_names_blob = " ".join(str(item.get("normalized_name") or "") for item in albums).strip()
+        if normalized_names_blob and _COMPILATION_RISK_PATTERN.search(normalized_names_blob):
+            warning_flags.append("compilation_risk")
+        if normalized_names_blob and _SOUNDTRACK_RISK_PATTERN.search(normalized_names_blob):
+            warning_flags.append("soundtrack_risk")
+
+        confidence_score = 0.45
+        if title_similarity_score >= 0.95:
+            confidence_score += 0.2
+        if artist_match_signal == "same_primary_artist_signature":
+            confidence_score += 0.2
+        if year_proximity_signal == "close_years":
+            confidence_score += 0.1
+        elif year_proximity_signal == "moderate_year_gap":
+            confidence_score += 0.03
+        if suffix_signals:
+            confidence_score += 0.08
+        if "missing_track_evidence" not in warning_flags:
+            confidence_score += 0.04
+        confidence_score = max(0.0, min(round(confidence_score, 4), 0.99))
+
+        if "different_artist" in warning_flags or "weak_title_match" in warning_flags:
+            recommended_decision = "reject"
+        elif any(
+            flag in warning_flags for flag in ["large_year_gap", "missing_track_evidence", "compilation_risk", "soundtrack_risk"]
+        ):
+            recommended_decision = "needs_more_evidence"
+        elif confidence_score >= 0.8:
+            recommended_decision = "accept"
+        else:
+            recommended_decision = "needs_more_evidence"
+
+        explanation = (
+            f"anchor='{anchor_key}' "
+            f"artist_signal='{artist_match_signal}' "
+            f"year_signal='{year_proximity_signal}' "
+            f"suffix_signal='{suffix_version_signal or 'none'}'"
+        )
+        candidate_group_key = f"{anchor_key}||{artist_signature or '__no_artist__'}"
+
+        sorted_albums = sorted(albums, key=lambda item: int(item["release_album_id"]))
+        candidate_items.append(
+            {
+                "candidate_status": "suggested_only",
+                "candidate_group_key": candidate_group_key,
+                "anchor_key": anchor_key,
+                "primary_artist_signature": artist_signature,
+                "release_album_count": len(sorted_albums),
+                "distinct_effective_family_count": len(distinct_families),
+                "release_album_ids": [int(item["release_album_id"]) for item in sorted_albums],
+                "current_album_family_ids": sorted(int(family_id) for family_id in distinct_families),
+                "album_names": [str(item["primary_name"] or "") for item in sorted_albums],
+                "album_normalized_names": [str(item["normalized_name"] or "") for item in sorted_albums],
+                "primary_artist_names": artist_names,
+                "primary_artist_ids": artist_ids,
+                "release_years": [item["release_year"] for item in sorted_albums],
+                "track_counts": [int(item.get("track_count") or 0) for item in sorted_albums],
+                "title_similarity_score": float(title_similarity_score),
+                "title_match_reason": title_match_reason,
+                "artist_match_signal": artist_match_signal,
+                "year_proximity_signal": year_proximity_signal,
+                "suffix_version_signal": suffix_version_signal,
+                "confidence_score": float(confidence_score),
+                "explanation": explanation,
+                "warning_flags": warning_flags,
+                "recommended_decision": recommended_decision,
+                "release_albums": sorted_albums,
+            }
+        )
+
+    candidate_items.sort(
+        key=lambda item: (
+            -int(item["distinct_effective_family_count"]),
+            -int(item["release_album_count"]),
+            str(item["anchor_key"]),
+            str(item["primary_artist_signature"]),
+        )
+    )
+    paged_items = candidate_items[bounded_offset : bounded_offset + bounded_limit]
+
+    return {
+        "summary": {
+            "total_release_albums_scanned": len(rows),
+            "total_candidate_groups": len(candidate_items),
+            "candidate_status": "suggested_only",
+            "mutations_applied": 0,
+        },
+        "pagination": {
+            "limit": bounded_limit,
+            "offset": bounded_offset,
+            "returned": len(paged_items),
+            "has_more": bounded_offset + len(paged_items) < len(candidate_items),
+        },
+        "items": paged_items,
+    }
+
+
 def raw_play_event_exists(
     *,
     source_row_key: str,
@@ -2718,6 +3207,26 @@ def _normalize_name(value: str | None) -> str | None:
     return normalized or None
 
 
+def _normalize_fallback_artist_text(raw: str | None) -> str:
+    if raw is None:
+        return ""
+    parts = [part.strip() for part in str(raw).split(",")]
+    seen: set[str] = set()
+    canonical_parts: list[str] = []
+    for part in parts:
+        normalized_part = " ".join(part.split())
+        if not normalized_part:
+            continue
+        key = normalized_part.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        canonical_parts.append(normalized_part)
+    if not canonical_parts:
+        return ""
+    return canonical_parts[0]
+
+
 def _stable_text_key(*parts: str | None) -> str:
     payload = "|".join("" if part is None else str(part).strip() for part in parts)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
@@ -3049,7 +3558,9 @@ def _ensure_history_text_artist_mapping_with_connection(
     *,
     artist_name_raw: str | None,
 ) -> int | None:
-    artist_label = artist_name_raw.strip() if artist_name_raw and artist_name_raw.strip() else None
+    artist_label = _normalize_fallback_artist_text(artist_name_raw)
+    if not artist_label:
+        artist_label = artist_name_raw.strip() if artist_name_raw and artist_name_raw.strip() else None
     if artist_label is None:
         return None
 
@@ -3218,7 +3729,8 @@ def _ensure_history_text_album_mapping_with_connection(
     if album_title is None:
         return None
 
-    external_id = _stable_text_key("history_raw_album", album_title, artist_name_raw)
+    fallback_artist_key = _normalize_fallback_artist_text(artist_name_raw)
+    external_id = _stable_text_key("history_raw_album", album_title, fallback_artist_key)
     existing = connection.execute(
         """
         SELECT
@@ -3681,7 +4193,8 @@ def _resolve_release_track_id_for_local_backfill_with_connection(
     if track_title is None:
         return None
 
-    external_id = _stable_text_key("history_raw_track", track_title, artist_name_raw, album_name_raw)
+    fallback_artist_key = _normalize_fallback_artist_text(artist_name_raw)
+    external_id = _stable_text_key("history_raw_track", track_title, fallback_artist_key, album_name_raw)
     return _ensure_source_track_mapping_with_connection(
         connection,
         source_name="history_raw",
@@ -3730,6 +4243,30 @@ def backfill_spotify_source_entities() -> dict[str, int]:
         }
         rows = connection.execute(
             """
+            WITH candidate_rows AS (
+              SELECT
+                id,
+                spotify_track_id,
+                spotify_track_uri,
+                track_name_raw,
+                track_duration_ms,
+                artist_name_raw,
+                album_name_raw,
+                spotify_album_id,
+                spotify_artist_ids_json,
+                raw_payload_json,
+                row_number() OVER (
+                  PARTITION BY
+                    COALESCE(spotify_track_id, ''),
+                    COALESCE(spotify_album_id, ''),
+                    COALESCE(spotify_artist_ids_json, '')
+                  ORDER BY id ASC
+                ) AS rn
+              FROM raw_play_event
+              WHERE spotify_track_id IS NOT NULL
+                 OR spotify_album_id IS NOT NULL
+                 OR spotify_artist_ids_json IS NOT NULL
+            )
             SELECT
               spotify_track_id,
               spotify_track_uri,
@@ -3740,10 +4277,8 @@ def backfill_spotify_source_entities() -> dict[str, int]:
               spotify_album_id,
               spotify_artist_ids_json,
               raw_payload_json
-            FROM raw_play_event
-            WHERE spotify_track_id IS NOT NULL
-               OR spotify_album_id IS NOT NULL
-               OR spotify_artist_ids_json IS NOT NULL
+            FROM candidate_rows
+            WHERE rn = 1
             ORDER BY id ASC
             """
         ).fetchall()
@@ -3933,6 +4468,34 @@ def backfill_local_text_entities() -> dict[str, int]:
 
         rows = connection.execute(
             """
+            WITH candidate_rows AS (
+              SELECT
+                id,
+                spotify_track_id,
+                spotify_track_uri,
+                track_name_raw,
+                track_duration_ms,
+                artist_name_raw,
+                album_name_raw,
+                spotify_album_id,
+                row_number() OVER (
+                  PARTITION BY
+                    COALESCE(spotify_track_id, ''),
+                    COALESCE(spotify_track_uri, ''),
+                    COALESCE(track_name_raw, ''),
+                    COALESCE(artist_name_raw, ''),
+                    COALESCE(album_name_raw, ''),
+                    COALESCE(spotify_album_id, ''),
+                    COALESCE(track_duration_ms, -1)
+                  ORDER BY id ASC
+                ) AS rn
+              FROM raw_play_event
+              WHERE
+                (track_name_raw IS NOT NULL AND trim(track_name_raw) != '')
+                OR (artist_name_raw IS NOT NULL AND trim(artist_name_raw) != '')
+                OR (album_name_raw IS NOT NULL AND trim(album_name_raw) != '')
+                OR (spotify_track_uri IS NOT NULL AND trim(spotify_track_uri) != '')
+            )
             SELECT
               spotify_track_id,
               spotify_track_uri,
@@ -3941,12 +4504,8 @@ def backfill_local_text_entities() -> dict[str, int]:
               artist_name_raw,
               album_name_raw,
               spotify_album_id
-            FROM raw_play_event
-            WHERE
-              (track_name_raw IS NOT NULL AND trim(track_name_raw) != '')
-              OR (artist_name_raw IS NOT NULL AND trim(artist_name_raw) != '')
-              OR (album_name_raw IS NOT NULL AND trim(album_name_raw) != '')
-              OR (spotify_track_uri IS NOT NULL AND trim(spotify_track_uri) != '')
+            FROM candidate_rows
+            WHERE rn = 1
             ORDER BY id ASC
             """
         ).fetchall()

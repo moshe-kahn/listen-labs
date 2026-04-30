@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { Fragment, type ReactNode, useEffect, useRef, useState } from "react";
 
 type SessionResponse = {
   authenticated: boolean;
@@ -82,6 +82,7 @@ type RecentTrack = {
   spotify_skipped?: boolean | null;
   spotify_shuffle?: boolean | null;
   spotify_offline?: boolean | null;
+  formula_rank_delta?: number | null;
 };
 
 type MatchCounts = {
@@ -238,6 +239,547 @@ type MergedTrackAggregateResponse = {
   items: RecentTrack[];
 };
 
+type TrackIdentityAuditExample = Record<string, unknown>;
+
+type TrackIdentityAuditResponse = {
+  limit: number;
+  same_name_canonical_splits: TrackIdentityAuditExample[];
+  release_track_source_splits: TrackIdentityAuditExample[];
+  analysis_track_groups: TrackIdentityAuditExample[];
+};
+
+type IdentityAuditTab = "overview" | "canonical" | "composition" | "family" | "release";
+
+type AmbiguousReviewComponent = {
+  label: string;
+  family: string;
+  semantic_category: string;
+  groupable_by_default: boolean;
+};
+
+type AmbiguousReviewItem = {
+  entry_id: string;
+  bucket: "grouped" | "ungrouped";
+  release_track_id: number;
+  release_track_name: string;
+  artist_name: string;
+  analysis_name: string | null;
+  song_family_key: string | null;
+  confidence: number | null;
+  review_families: string[];
+  dominant_family: string | null;
+  base_title_anchor: string | null;
+  components: AmbiguousReviewComponent[];
+  raw_component_summary: string;
+};
+
+type AmbiguousReviewResponse = {
+  source: {
+    kind: string;
+    path: string;
+    generated_at: string | null;
+  };
+  summary: {
+    grouped_review_entries: number;
+    ungrouped_review_entries: number;
+    total_review_entries: number;
+  };
+  family_counts: Array<{
+    family: string;
+    count: number;
+  }>;
+  pagination: {
+    limit: number;
+    offset: number;
+    returned: number;
+    has_more: boolean;
+  };
+  filters: {
+    family: string | null;
+    bucket: string | null;
+  };
+  items: AmbiguousReviewItem[];
+  parse_warning: string;
+};
+
+type SuggestedGroupReleaseTrack = {
+  release_track_id: number;
+  release_track_name: string;
+  normalized_name: string;
+  primary_artists: string;
+  album_names: string;
+  source_refs: string;
+  source_map_methods: string;
+};
+
+type SuggestedAnalysisGroup = {
+  analysis_track_id: number;
+  analysis_track_name: string;
+  grouping_note: string;
+  grouping_hash: string | null;
+  song_family_key: string | null;
+  match_method: string;
+  confidence: number;
+  status: string;
+  release_track_count: number;
+  release_tracks: SuggestedGroupReleaseTrack[];
+};
+
+type SuggestedGroupsResponse = {
+  summary: {
+    total_groups: number;
+    status: string;
+  };
+  pagination: {
+    limit: number;
+    offset: number;
+    returned: number;
+    has_more: boolean;
+  };
+  items: SuggestedAnalysisGroup[];
+};
+
+type LocalReviewVerdict = "good_to_group" | "not_good" | "skipped" | "unsure";
+type LocalGroupingTarget = "same_composition" | "same_release_track_only" | null;
+type LocalReviewDecision = {
+  verdict: LocalReviewVerdict;
+  grouping_target: LocalGroupingTarget;
+  note: string;
+  updated_at_ms: number;
+};
+
+type SubmissionPreviewValidationResponse = {
+  ok: boolean;
+  summary: {
+    total_decisions: number;
+    group_decisions: number;
+    track_decisions: number;
+    approved: number;
+    rejected: number;
+    skipped: number;
+    unknown_groups: number;
+    unknown_tracks: number;
+    warnings: number;
+  };
+  warnings: string[];
+  unknown_items: {
+    groups: Array<Record<string, unknown>>;
+    tracks: Array<Record<string, unknown>>;
+  };
+  validated: {
+    groups: {
+      approved: Array<Record<string, unknown>>;
+      rejected: Array<Record<string, unknown>>;
+      skipped: Array<Record<string, unknown>>;
+    };
+    tracks: {
+      approved: Array<Record<string, unknown>>;
+      rejected: Array<Record<string, unknown>>;
+      skipped: Array<Record<string, unknown>>;
+    };
+  };
+};
+
+type IdentityAuditSubmissionSaveResponse = {
+  ok: boolean;
+  submission_id: number;
+  status: string;
+  created_at: string;
+  summary: {
+    total_decisions: number;
+    group_decisions: number;
+    track_decisions: number;
+    approved: number;
+    rejected: number;
+    skipped: number;
+    unknown_groups: number;
+    unknown_tracks: number;
+    warnings: number;
+  };
+  warnings: string[];
+  unknown_items: {
+    groups: Array<Record<string, unknown>>;
+    tracks: Array<Record<string, unknown>>;
+  };
+};
+
+type IdentityAuditSavedSubmissionListItem = {
+  id: number;
+  created_at: string;
+  status: string;
+  summary: {
+    total_decisions?: number;
+    group_decisions?: number;
+    track_decisions?: number;
+    approved?: number;
+    rejected?: number;
+    skipped?: number;
+    unknown_groups?: number;
+    unknown_tracks?: number;
+    warnings?: number;
+  };
+  warnings_count: number;
+  unknown_groups: number;
+  unknown_tracks: number;
+  notes: string | null;
+};
+
+type IdentityAuditSavedSubmissionListResponse = {
+  ok: boolean;
+  items: IdentityAuditSavedSubmissionListItem[];
+  total: number;
+};
+
+type IdentityAuditSavedSubmissionReadResponse = {
+  ok: boolean;
+  item: {
+    id: number;
+    created_at: string;
+    status: string;
+    payload: Record<string, unknown>;
+    validation: SubmissionPreviewValidationResponse;
+    notes: string | null;
+    promoted_at: string | null;
+  };
+};
+
+type IdentityAuditSubmissionDryRunResponse = {
+  ok: boolean;
+  submission_id: number;
+  status: "dry_run";
+  validation: SubmissionPreviewValidationResponse;
+  summary: {
+    approved_groups: number;
+    approved_tracks: number;
+    rejected: number;
+    skipped: number;
+    would_apply: number;
+    warnings: number;
+    unknown_groups: number;
+    unknown_tracks: number;
+  };
+  plan: {
+    groups: Array<Record<string, unknown>>;
+    tracks: Array<Record<string, unknown>>;
+  };
+  noops: {
+    rejected: Array<Record<string, unknown>>;
+    skipped: Array<Record<string, unknown>>;
+  };
+  warnings: string[];
+};
+
+type CatalogBackfillRunItem = {
+  id: number;
+  started_at: string | null;
+  completed_at: string | null;
+  market: string | null;
+  status: string | null;
+  tracks_seen: number;
+  tracks_fetched: number;
+  tracks_upserted: number;
+  albums_seen: number;
+  albums_fetched: number;
+  album_tracks_upserted: number;
+  album_tracklists_seen?: number;
+  album_tracklists_skipped_by_policy?: number;
+  album_tracklists_fetched?: number;
+  skipped: number;
+  errors: number;
+  requests_total: number;
+  requests_success: number;
+  requests_429: number;
+  requests_failed: number;
+  initial_request_delay_seconds: number;
+  final_request_delay_seconds: number;
+  effective_requests_per_minute: number;
+  peak_requests_last_30_seconds: number;
+  max_retry_after_seconds: number;
+  last_retry_after_seconds?: number;
+  has_more: boolean;
+  last_error: string | null;
+  warnings?: string[];
+  warnings_count?: number;
+  partial?: boolean | null;
+  stop_reason?: string | null;
+  album_tracklist_policy?: "all" | "priority_only" | "relevant_albums" | "none" | string;
+};
+
+type CatalogBackfillRunsResponse = {
+  ok: boolean;
+  items: CatalogBackfillRunItem[];
+  total: number;
+};
+
+type CatalogBackfillQueueItem = {
+  id: number;
+  entity_type: "track" | "album" | string;
+  spotify_id: string;
+  reason: string | null;
+  priority: number;
+  status: "pending" | "done" | "error" | string;
+  requested_at: string | null;
+  last_attempted_at: string | null;
+  attempts: number;
+  last_error: string | null;
+};
+
+type CatalogBackfillQueueResponse = {
+  ok: boolean;
+  items: CatalogBackfillQueueItem[];
+  total: number;
+  counts: {
+    pending: number;
+    done: number;
+    error: number;
+  };
+};
+
+type CatalogBackfillQueueRepairResponse = {
+  ok: boolean;
+  repaired: number;
+};
+
+type AlbumCatalogLookupItem = {
+  release_album_id: number;
+  release_album_name: string;
+  artist_name: string;
+  spotify_album_id: string | null;
+  spotify_album_name: string | null;
+  album_type: string | null;
+  release_date: string | null;
+  total_tracks: number | null;
+  album_track_rows: number;
+  tracklist_complete: boolean;
+  catalog_fetched_at: string | null;
+  catalog_last_status: string | null;
+  catalog_last_error: string | null;
+  queue_status: "not_queued" | "pending" | "done" | "error" | string;
+  queue_priority: number | null;
+  queue_requested_at: string | null;
+  queue_attempts: number | null;
+  queue_last_error: string | null;
+};
+
+type AlbumCatalogLookupResponse = {
+  ok: boolean;
+  items: AlbumCatalogLookupItem[];
+  total: number;
+};
+
+type AlbumDuplicateReleaseItem = {
+  release_album_id: number;
+  release_album_name: string;
+  artist_name: string;
+  album_track_rows: number;
+  total_tracks: number | null;
+  catalog_status: string | null;
+  queue_status: "not_queued" | "pending" | "done" | "error" | string;
+};
+
+type AlbumDuplicateGroupItem = {
+  spotify_album_id: string;
+  spotify_album_name: string | null;
+  duplicate_count: number;
+  release_albums: AlbumDuplicateReleaseItem[];
+};
+
+type AlbumDuplicateLookupResponse = {
+  ok: boolean;
+  items: AlbumDuplicateGroupItem[];
+  total: number;
+};
+
+type AlbumNameDuplicateGroupItem = {
+  normalized_album_name: string;
+  normalized_primary_artist: string;
+  duplicate_count: number;
+  spotify_album_ids: string[];
+  release_albums: Array<{
+    release_album_id: number;
+    release_album_name: string;
+    artist_name: string;
+    spotify_album_id: string | null;
+    spotify_album_name: string | null;
+    album_track_rows: number;
+    total_tracks: number | null;
+    catalog_status: string | null;
+    queue_status: "not_queued" | "pending" | "done" | "error" | string;
+  }>;
+};
+
+type AlbumNameDuplicateLookupResponse = {
+  ok: boolean;
+  items: AlbumNameDuplicateGroupItem[];
+  total: number;
+};
+
+type ReleaseAlbumMergePreviewResponse = {
+  ok: boolean;
+  survivor_release_album_id: number | null;
+  merge_release_album_ids: number[];
+  merge_readiness: "safe_candidate" | "needs_review" | "unsafe" | string;
+  readiness_reasons: string[];
+  warnings: string[];
+  affected: {
+    source_album_map_rows: number;
+    album_artist_rows: number;
+    release_track_rows: number;
+    album_track_rows: number;
+    album_track_conflicts: number;
+    raw_play_event_rows: number;
+  };
+  proposed_operations: string[];
+};
+
+type ReleaseAlbumMergeDryRunResponse = {
+  ok: boolean;
+  blocked: boolean;
+  blocked_reasons: string[];
+  merge_readiness: "safe_candidate" | "needs_review" | "unsafe" | string;
+  readiness_reasons: string[];
+  survivor_release_album_id: number | null;
+  merge_release_album_ids: number[];
+  rows_affected: Record<string, number>;
+  plan: {
+    source_album_map_repoints: Array<Record<string, unknown>>;
+    album_artist_inserts: Array<Record<string, unknown>>;
+    album_artist_deletes: Array<Record<string, unknown>>;
+    album_track_repoints: Array<Record<string, unknown>>;
+    album_track_conflicts: Array<Record<string, unknown>>;
+    release_album_retirements: Array<Record<string, unknown>>;
+  };
+  statements: string[];
+};
+
+type TrackDuplicateReleaseItem = {
+  release_track_id: number;
+  release_track_name: string;
+  artist_name: string;
+  release_album_name: string;
+  spotify_album_id: string | null;
+  catalog_status: string | null;
+  queue_status: "not_queued" | "pending" | "done" | "error" | string;
+};
+
+type TrackDuplicateGroupItem = {
+  spotify_track_id: string;
+  spotify_track_name: string | null;
+  duration_ms: number | null;
+  duration_display: string | null;
+  duplicate_count: number;
+  release_tracks: TrackDuplicateReleaseItem[];
+};
+
+type TrackDuplicateLookupResponse = {
+  ok: boolean;
+  items: TrackDuplicateGroupItem[];
+  total: number;
+};
+
+type TrackCatalogLookupItem = {
+  release_track_id: number;
+  release_track_name: string;
+  artist_name: string;
+  release_album_name: string;
+  spotify_track_id: string | null;
+  spotify_track_name: string | null;
+  duration_ms: number | null;
+  duration_display: string | null;
+  album_id: string | null;
+  catalog_fetched_at: string | null;
+  catalog_last_status: string | null;
+  catalog_last_error: string | null;
+  queue_status: "not_queued" | "pending" | "done" | "error" | string;
+  queue_priority: number | null;
+  queue_requested_at: string | null;
+  queue_attempts: number | null;
+  queue_last_error: string | null;
+};
+
+type TrackCatalogLookupResponse = {
+  ok: boolean;
+  items: TrackCatalogLookupItem[];
+  total: number;
+};
+
+type CatalogBackfillCoverageResponse = {
+  ok: boolean;
+  known_release_tracks: number;
+  track_catalog_rows: number;
+  track_duration_coverage_count: number;
+  track_duration_coverage_percent: number;
+  known_release_albums: number;
+  album_catalog_rows: number;
+  album_track_rows: number;
+  latest_run: CatalogBackfillRunItem | null;
+  recent_errors_count: number;
+};
+
+type CatalogBackfillRunResponse = {
+  ok: boolean;
+  run_id: number;
+  status: string;
+  tracks_seen: number;
+  tracks_fetched: number;
+  tracks_upserted: number;
+  albums_seen: number;
+  albums_fetched: number;
+  album_tracks_upserted: number;
+  album_tracklists_seen?: number;
+  album_tracklists_skipped_by_policy?: number;
+  album_tracklists_fetched?: number;
+  skipped: number;
+  errors: number;
+  requests_total: number;
+  requests_success: number;
+  requests_429: number;
+  requests_failed: number;
+  initial_request_delay_seconds: number;
+  final_request_delay_seconds: number;
+  effective_requests_per_minute: number;
+  peak_requests_last_30_seconds: number;
+  max_retry_after_seconds: number;
+  last_retry_after_seconds: number;
+  has_more: boolean;
+  warnings: string[];
+  warnings_count?: number;
+  partial: boolean;
+  stop_reason: string | null;
+  market: string;
+  limit: number;
+  offset: number;
+  include_albums: boolean;
+  force_refresh: boolean;
+  album_tracklist_policy?: "all" | "priority_only" | "relevant_albums" | "none" | string;
+  max_runtime_seconds: number;
+  max_requests: number;
+  max_errors: number;
+  max_album_tracks_pages_per_album: number;
+  max_429: number;
+  last_error: string | null;
+};
+
+type CatalogBackfillEnqueueResponse = {
+  ok: boolean;
+  received: number;
+  enqueued: number;
+  already_complete: number;
+  updated: number;
+  invalid: number;
+};
+
+type UnifiedReviewItem = {
+  decision_key: string;
+  item_type: "group" | "track";
+  title: string;
+  subtitle: string;
+  bucket_label: string;
+  family_label: string;
+  group: SuggestedAnalysisGroup | null;
+  track: AmbiguousReviewItem | null;
+};
+
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "/api";
 const githubRepoUrl = "https://github.com/moshe-kahn/listen-labs";
 const EXPERIENCE_MODE_STORAGE_KEY = "listenlab-experience-mode";
@@ -251,6 +793,8 @@ const PREVIEW_RAMP_STEP_MS = 90;
 const PAGE_SIZE = 5;
 const RECENT_SECTION_FETCH_LIMIT = 10;
 const PLAYLISTS_PAGE_SIZE = 10;
+const TRACKS_FORMULA_FETCH_LIMIT = 100;
+const IDENTITY_AUDIT_AMBIGUOUS_VISIBLE_STEP = 100;
 const DEBUG_SESSION_BREAK_MS = 45 * 60 * 1000;
 const DEBUG_GAP_MARKER_MIN_MS = 5_000;
 const DEBUG_GAP_MARKER_MAX_MS = 10 * 60 * 1000;
@@ -259,10 +803,10 @@ const RECENT_RANGE_OPTIONS = [
   { value: "medium_term", label: "6 months" },
 ] as const;
 const MERGED_TRACK_SOURCE_FILTER_OPTIONS = [
-  { value: "all", label: "All" },
-  { value: "recent", label: "Recent" },
-  { value: "history", label: "History" },
-  { value: "both", label: "Both" },
+  { value: "all", label: "All plays" },
+  { value: "recent", label: "API only" },
+  { value: "history", label: "History only" },
+  { value: "both", label: "Matched" },
 ] as const;
 const RECENT_DEBUG_SOURCE_FILTER_OPTIONS = [
   { value: "all", label: "All" },
@@ -270,12 +814,19 @@ const RECENT_DEBUG_SOURCE_FILTER_OPTIONS = [
   { value: "history", label: "History" },
   { value: "both", label: "Both" },
 ] as const;
+const RANK_MOVEMENT_FILTER_OPTIONS = [
+  { value: "all", label: "All" },
+  { value: "risers", label: "Risers" },
+  { value: "fallers", label: "Fallers" },
+] as const;
 type RecentRange = (typeof RECENT_RANGE_OPTIONS)[number]["value"];
 type AnalysisMode = "quick" | "full";
 type ExperienceMode = "full" | "local";
 type ExperienceVisualMode = ExperienceMode | "test";
 type TrackRankingMode = "plays" | "mix" | "longevity";
-type AppPage = "dashboard" | "tracksOnly" | "recentDebug";
+type RankMovementFilter = (typeof RANK_MOVEMENT_FILTER_OPTIONS)[number]["value"];
+type AppPage = "dashboard" | "formulaLab" | "identityAudit" | "recentDebug" | "catalogBackfill" | "searchLookup";
+type CatalogBackfillTab = "recentRuns" | "queue";
 const spotifyLogoDataUrl =
   "data:image/svg+xml;utf8," +
   encodeURIComponent(
@@ -540,6 +1091,7 @@ export function App() {
   const [sectionPages, setSectionPages] = useState<Record<SectionKey, number>>(INITIAL_SECTION_PAGES);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const [brandMenuOpen, setBrandMenuOpen] = useState(false);
+  const [experimentalMenuOpen, setExperimentalMenuOpen] = useState(false);
   const [profileSettingsOpen, setProfileSettingsOpen] = useState(false);
   const [playerMenuOpen, setPlayerMenuOpen] = useState(false);
   const [rateLimitMenuOpen, setRateLimitMenuOpen] = useState(false);
@@ -582,12 +1134,127 @@ export function App() {
   const [listeningLogError, setListeningLogError] = useState("");
   const [listeningLogLastLoadedAt, setListeningLogLastLoadedAt] = useState<number | null>(null);
   const [recentDebugSourceFilter, setRecentDebugSourceFilter] = useState<RecentDebugSourceFilter>("all");
+  const [catalogBackfillCoverage, setCatalogBackfillCoverage] = useState<CatalogBackfillCoverageResponse | null>(null);
+  const [catalogBackfillCoverageLoading, setCatalogBackfillCoverageLoading] = useState(false);
+  const [catalogBackfillCoverageLoaded, setCatalogBackfillCoverageLoaded] = useState(false);
+  const [catalogBackfillCoverageError, setCatalogBackfillCoverageError] = useState("");
+  const [catalogBackfillCoverageLastLoadedAt, setCatalogBackfillCoverageLastLoadedAt] = useState<number | null>(null);
+  const [catalogBackfillRuns, setCatalogBackfillRuns] = useState<CatalogBackfillRunsResponse | null>(null);
+  const [catalogBackfillRunsLoading, setCatalogBackfillRunsLoading] = useState(false);
+  const [catalogBackfillRunsLoaded, setCatalogBackfillRunsLoaded] = useState(false);
+  const [catalogBackfillRunsError, setCatalogBackfillRunsError] = useState("");
+  const [catalogBackfillRunsLastLoadedAt, setCatalogBackfillRunsLastLoadedAt] = useState<number | null>(null);
+  const [catalogBackfillQueue, setCatalogBackfillQueue] = useState<CatalogBackfillQueueResponse | null>(null);
+  const [catalogBackfillQueueLoading, setCatalogBackfillQueueLoading] = useState(false);
+  const [catalogBackfillQueueLoaded, setCatalogBackfillQueueLoaded] = useState(false);
+  const [catalogBackfillQueueError, setCatalogBackfillQueueError] = useState("");
+  const [catalogBackfillQueueLastLoadedAt, setCatalogBackfillQueueLastLoadedAt] = useState<number | null>(null);
+  const [catalogBackfillQueueStatusFilter, setCatalogBackfillQueueStatusFilter] = useState<"all" | "pending" | "done" | "error">("all");
+  const [catalogBackfillTab, setCatalogBackfillTab] = useState<CatalogBackfillTab>("recentRuns");
+  const [catalogBackfillQueueRepairLoading, setCatalogBackfillQueueRepairLoading] = useState(false);
+  const [catalogBackfillQueueRepairMessage, setCatalogBackfillQueueRepairMessage] = useState("");
+  const [catalogBackfillRunLoading, setCatalogBackfillRunLoading] = useState(false);
+  const [catalogBackfillRunError, setCatalogBackfillRunError] = useState("");
+  const [catalogBackfillLatestResult, setCatalogBackfillLatestResult] = useState<CatalogBackfillRunResponse | null>(null);
+  const [catalogBackfillLimit, setCatalogBackfillLimit] = useState(25);
+  const [catalogBackfillOffset, setCatalogBackfillOffset] = useState(0);
+  const [catalogBackfillMarket, setCatalogBackfillMarket] = useState("US");
+  const [catalogBackfillIncludeAlbums, setCatalogBackfillIncludeAlbums] = useState(true);
+  const [catalogBackfillForceRefresh, setCatalogBackfillForceRefresh] = useState(false);
+  const [catalogBackfillRequestDelaySeconds, setCatalogBackfillRequestDelaySeconds] = useState(0.5);
+  const [catalogBackfillMaxRuntimeSeconds, setCatalogBackfillMaxRuntimeSeconds] = useState(60);
+  const [catalogBackfillMaxRequests, setCatalogBackfillMaxRequests] = useState(150);
+  const [catalogBackfillMaxErrors, setCatalogBackfillMaxErrors] = useState(10);
+  const [catalogBackfillMaxAlbumTracksPagesPerAlbum, setCatalogBackfillMaxAlbumTracksPagesPerAlbum] = useState(10);
+  const [catalogBackfillMax429, setCatalogBackfillMax429] = useState(3);
+  const [catalogBackfillAlbumTracklistPolicy, setCatalogBackfillAlbumTracklistPolicy] = useState<"all" | "priority_only" | "relevant_albums" | "none">("relevant_albums");
+  const [searchLookupEntityType, setSearchLookupEntityType] = useState<"albums" | "tracks" | "duplicate_albums">("albums");
+  const [searchLookupQueueStatus, setSearchLookupQueueStatus] = useState<"all" | "not_queued" | "pending" | "done" | "error">("all");
+  const [searchLookupSort, setSearchLookupSort] = useState<"default" | "recently_backfilled" | "name" | "incomplete_first">("default");
+  const [albumCatalogLookupQ, setAlbumCatalogLookupQ] = useState("");
+  const [albumCatalogLookupStatus, setAlbumCatalogLookupStatus] = useState<"all" | "backfilled" | "not_backfilled" | "tracklist_complete" | "tracklist_incomplete" | "error">("all");
+  const [albumCatalogLookupResult, setAlbumCatalogLookupResult] = useState<AlbumCatalogLookupResponse | null>(null);
+  const [albumCatalogLookupLoading, setAlbumCatalogLookupLoading] = useState(false);
+  const [albumCatalogLookupLoaded, setAlbumCatalogLookupLoaded] = useState(false);
+  const [albumCatalogLookupError, setAlbumCatalogLookupError] = useState("");
+  const [albumCatalogLookupLastLoadedAt, setAlbumCatalogLookupLastLoadedAt] = useState<number | null>(null);
+  const [trackCatalogLookupStatus, setTrackCatalogLookupStatus] = useState<"all" | "backfilled" | "not_backfilled" | "duration_missing" | "error">("all");
+  const [trackCatalogLookupResult, setTrackCatalogLookupResult] = useState<TrackCatalogLookupResponse | null>(null);
+  const [trackCatalogLookupLoading, setTrackCatalogLookupLoading] = useState(false);
+  const [trackCatalogLookupLoaded, setTrackCatalogLookupLoaded] = useState(false);
+  const [trackCatalogLookupError, setTrackCatalogLookupError] = useState("");
+  const [trackCatalogLookupLastLoadedAt, setTrackCatalogLookupLastLoadedAt] = useState<number | null>(null);
+  const [albumDuplicateLookupResult, setAlbumDuplicateLookupResult] = useState<AlbumDuplicateLookupResponse | null>(null);
+  const [albumDuplicateLookupLoading, setAlbumDuplicateLookupLoading] = useState(false);
+  const [albumDuplicateLookupLoaded, setAlbumDuplicateLookupLoaded] = useState(false);
+  const [albumDuplicateLookupError, setAlbumDuplicateLookupError] = useState("");
+  const [albumDuplicateLookupLastLoadedAt, setAlbumDuplicateLookupLastLoadedAt] = useState<number | null>(null);
+  const [albumNameDuplicateLookupResult, setAlbumNameDuplicateLookupResult] = useState<AlbumNameDuplicateLookupResponse | null>(null);
+  const [albumNameDuplicateLookupLoading, setAlbumNameDuplicateLookupLoading] = useState(false);
+  const [albumNameDuplicateLookupLoaded, setAlbumNameDuplicateLookupLoaded] = useState(false);
+  const [albumNameDuplicateLookupError, setAlbumNameDuplicateLookupError] = useState("");
+  const [albumNameDuplicateLookupLastLoadedAt, setAlbumNameDuplicateLookupLastLoadedAt] = useState<number | null>(null);
+  const [releaseAlbumMergePreviewByKey, setReleaseAlbumMergePreviewByKey] = useState<Record<string, ReleaseAlbumMergePreviewResponse>>({});
+  const [releaseAlbumMergePreviewLoadingKey, setReleaseAlbumMergePreviewLoadingKey] = useState<string | null>(null);
+  const [releaseAlbumMergePreviewErrorByKey, setReleaseAlbumMergePreviewErrorByKey] = useState<Record<string, string>>({});
+  const [releaseAlbumMergeDryRunByKey, setReleaseAlbumMergeDryRunByKey] = useState<Record<string, ReleaseAlbumMergeDryRunResponse>>({});
+  const [releaseAlbumMergeDryRunLoadingKey, setReleaseAlbumMergeDryRunLoadingKey] = useState<string | null>(null);
+  const [releaseAlbumMergeDryRunErrorByKey, setReleaseAlbumMergeDryRunErrorByKey] = useState<Record<string, string>>({});
+  const [trackDuplicateLookupResult, setTrackDuplicateLookupResult] = useState<TrackDuplicateLookupResponse | null>(null);
+  const [trackDuplicateLookupLoading, setTrackDuplicateLookupLoading] = useState(false);
+  const [trackDuplicateLookupLoaded, setTrackDuplicateLookupLoaded] = useState(false);
+  const [trackDuplicateLookupError, setTrackDuplicateLookupError] = useState("");
+  const [trackDuplicateLookupLastLoadedAt, setTrackDuplicateLookupLastLoadedAt] = useState<number | null>(null);
+  const [albumCatalogLookupEnqueueLoading, setAlbumCatalogLookupEnqueueLoading] = useState(false);
+  const [albumCatalogLookupEnqueueError, setAlbumCatalogLookupEnqueueError] = useState("");
+  const [albumCatalogLookupEnqueueResult, setAlbumCatalogLookupEnqueueResult] = useState<CatalogBackfillEnqueueResponse | null>(null);
   const [mergedTracks, setMergedTracks] = useState<RecentTrack[]>([]);
   const [mergedTracksLoading, setMergedTracksLoading] = useState(false);
   const [mergedTracksLoaded, setMergedTracksLoaded] = useState(false);
   const [mergedTracksError, setMergedTracksError] = useState("");
   const [mergedTracksExcludedUnknownCount, setMergedTracksExcludedUnknownCount] = useState(0);
+  const [mergedTracksLastLoadedAt, setMergedTracksLastLoadedAt] = useState<number | null>(null);
   const [mergedTrackSourceFilter, setMergedTrackSourceFilter] = useState<MergedTrackSourceFilter>("all");
+  const [rankMovementFilter, setRankMovementFilter] = useState<RankMovementFilter>("all");
+  const [identityAudit, setIdentityAudit] = useState<TrackIdentityAuditResponse | null>(null);
+  const [identityAuditLoading, setIdentityAuditLoading] = useState(false);
+  const [identityAuditLoaded, setIdentityAuditLoaded] = useState(false);
+  const [identityAuditError, setIdentityAuditError] = useState("");
+  const [identityAuditLastLoadedAt, setIdentityAuditLastLoadedAt] = useState<number | null>(null);
+  const [identityAuditTab, setIdentityAuditTab] = useState<IdentityAuditTab>("overview");
+  const [identityAuditSuggestedGroups, setIdentityAuditSuggestedGroups] = useState<SuggestedGroupsResponse | null>(null);
+  const [identityAuditSuggestedLoading, setIdentityAuditSuggestedLoading] = useState(false);
+  const [identityAuditSuggestedLoaded, setIdentityAuditSuggestedLoaded] = useState(false);
+  const [identityAuditSuggestedError, setIdentityAuditSuggestedError] = useState("");
+  const [identityAuditSuggestedLastLoadedAt, setIdentityAuditSuggestedLastLoadedAt] = useState<number | null>(null);
+  const [identityAuditAmbiguous, setIdentityAuditAmbiguous] = useState<AmbiguousReviewResponse | null>(null);
+  const [identityAuditAmbiguousLoading, setIdentityAuditAmbiguousLoading] = useState(false);
+  const [identityAuditAmbiguousLoaded, setIdentityAuditAmbiguousLoaded] = useState(false);
+  const [identityAuditAmbiguousError, setIdentityAuditAmbiguousError] = useState("");
+  const [identityAuditAmbiguousLastLoadedAt, setIdentityAuditAmbiguousLastLoadedAt] = useState<number | null>(null);
+  const [identityAuditAmbiguousFamilyFilter, setIdentityAuditAmbiguousFamilyFilter] = useState("all");
+  const [identityAuditAmbiguousBucketFilter, setIdentityAuditAmbiguousBucketFilter] = useState<"all" | "grouped" | "ungrouped">("all");
+  const [identityAuditAmbiguousVisibleCount, setIdentityAuditAmbiguousVisibleCount] = useState(IDENTITY_AUDIT_AMBIGUOUS_VISIBLE_STEP);
+  const [identityAuditLocalDecisions, setIdentityAuditLocalDecisions] = useState<Record<string, LocalReviewDecision>>({});
+  const [identityAuditFocusedReviewKey, setIdentityAuditFocusedReviewKey] = useState<string | null>(null);
+  const [identityAuditPreviewCopyStatus, setIdentityAuditPreviewCopyStatus] = useState("");
+  const [identityAuditPreviewValidationLoading, setIdentityAuditPreviewValidationLoading] = useState(false);
+  const [identityAuditPreviewValidationError, setIdentityAuditPreviewValidationError] = useState("");
+  const [identityAuditPreviewValidationResult, setIdentityAuditPreviewValidationResult] = useState<SubmissionPreviewValidationResponse | null>(null);
+  const [identityAuditPreviewValidatedAt, setIdentityAuditPreviewValidatedAt] = useState<number | null>(null);
+  const [identityAuditSubmissionSaveLoading, setIdentityAuditSubmissionSaveLoading] = useState(false);
+  const [identityAuditSubmissionSaveError, setIdentityAuditSubmissionSaveError] = useState("");
+  const [identityAuditSubmissionSaveResult, setIdentityAuditSubmissionSaveResult] = useState<IdentityAuditSubmissionSaveResponse | null>(null);
+  const [identityAuditSavedSubmissions, setIdentityAuditSavedSubmissions] = useState<IdentityAuditSavedSubmissionListResponse | null>(null);
+  const [identityAuditSavedSubmissionsLoading, setIdentityAuditSavedSubmissionsLoading] = useState(false);
+  const [identityAuditSavedSubmissionsError, setIdentityAuditSavedSubmissionsError] = useState("");
+  const [identityAuditSavedSubmissionDetail, setIdentityAuditSavedSubmissionDetail] = useState<IdentityAuditSavedSubmissionReadResponse | null>(null);
+  const [identityAuditSavedSubmissionDetailLoading, setIdentityAuditSavedSubmissionDetailLoading] = useState(false);
+  const [identityAuditSavedSubmissionDetailError, setIdentityAuditSavedSubmissionDetailError] = useState("");
+  const [identityAuditSavedSubmissionDryRun, setIdentityAuditSavedSubmissionDryRun] = useState<IdentityAuditSubmissionDryRunResponse | null>(null);
+  const [identityAuditSavedSubmissionDryRunLoading, setIdentityAuditSavedSubmissionDryRunLoading] = useState(false);
+  const [identityAuditSavedSubmissionDryRunError, setIdentityAuditSavedSubmissionDryRunError] = useState("");
+  const [identityAuditSavedSubmissionDryRunAt, setIdentityAuditSavedSubmissionDryRunAt] = useState<number | null>(null);
   const [recentRangeRefreshPending, setRecentRangeRefreshPending] = useState(false);
   const [analysisMode, setAnalysisMode] = useState<AnalysisMode>("quick");
   const [experienceMode, setExperienceMode] = useState<ExperienceMode>(() => {
@@ -599,6 +1266,7 @@ export function App() {
   const [testProbeModeVisual, setTestProbeModeVisual] = useState<ExperienceVisualMode | null>(null);
   const profileMenuRef = useRef<HTMLDivElement | null>(null);
   const brandMenuRef = useRef<HTMLDivElement | null>(null);
+  const experimentalMenuRef = useRef<HTMLDivElement | null>(null);
   const playerMenuRef = useRef<HTMLDivElement | null>(null);
   const rateLimitMenuRef = useRef<HTMLDivElement | null>(null);
   const spotifyPlayerRef = useRef<SpotifyPlayerInstance | null>(null);
@@ -782,6 +1450,81 @@ export function App() {
       ? 1
       : Math.max(0, Math.min(1, 1 - (reloadCooldownUntil - reloadCountdownNow) / Math.max(reloadCooldownDurationMs, 1)));
 
+  function groupDecisionKey(group: SuggestedAnalysisGroup): string {
+    return `group:${group.analysis_track_id}`;
+  }
+
+  function trackDecisionKey(track: AmbiguousReviewItem): string {
+    return `track:${track.entry_id}`;
+  }
+
+  function isReviewedDecision(decision: LocalReviewDecision | undefined): boolean {
+    return Boolean(decision && decision.verdict !== "unsure");
+  }
+
+  function computeAmbiguousTrackItems(): AmbiguousReviewItem[] {
+    const allItems = identityAuditAmbiguous?.items ?? [];
+    return allItems.filter((item) => {
+      if (identityAuditAmbiguousFamilyFilter !== "all") {
+        if (!item.review_families.map((name) => name.toLowerCase()).includes(identityAuditAmbiguousFamilyFilter.toLowerCase())) {
+          return false;
+        }
+      }
+      if (identityAuditAmbiguousBucketFilter !== "all" && item.bucket !== identityAuditAmbiguousBucketFilter) {
+        return false;
+      }
+      return true;
+    });
+  }
+
+  function computeUnifiedReviewItems(): UnifiedReviewItem[] {
+    const suggestedItems = identityAuditSuggestedGroups?.items ?? [];
+    const trackItems = computeAmbiguousTrackItems();
+    const suggested = suggestedItems.map((group): UnifiedReviewItem => ({
+      decision_key: groupDecisionKey(group),
+      item_type: "group",
+      title: group.analysis_track_name || `Analysis Track ${group.analysis_track_id}`,
+      subtitle: `${group.release_track_count} release tracks | ${Math.round(group.confidence * 100)}% confidence`,
+      bucket_label: "Suggested groups",
+      family_label: group.song_family_key || "Suggested groups",
+      group,
+      track: null,
+    }));
+    const tracks = trackItems.map((track): UnifiedReviewItem => ({
+      decision_key: trackDecisionKey(track),
+      item_type: "track",
+      title: track.release_track_name,
+      subtitle: `${track.artist_name} | ${track.bucket}`,
+      bucket_label: "Ambiguous tracks",
+      family_label: track.dominant_family || track.review_families[0] || track.bucket || "Ambiguous tracks",
+      group: null,
+      track,
+    }));
+    return [...suggested, ...tracks];
+  }
+
+  function findNextUnreviewedDecisionKey(
+    items: UnifiedReviewItem[],
+    afterKey: string | null = null,
+    decisions: Record<string, LocalReviewDecision> = identityAuditLocalDecisions,
+  ): string | null {
+    if (items.length === 0) {
+      return null;
+    }
+    const startIndex = afterKey == null ? -1 : items.findIndex((item) => item.decision_key === afterKey);
+    for (let index = startIndex + 1; index < items.length; index += 1) {
+      if (!isReviewedDecision(decisions[items[index].decision_key])) {
+        return items[index].decision_key;
+      }
+    }
+    for (let index = 0; index <= startIndex; index += 1) {
+      if (!isReviewedDecision(decisions[items[index].decision_key])) {
+        return items[index].decision_key;
+      }
+    }
+    return null;
+  }
+
   useEffect(() => {
     if (appPage !== "recentDebug" || !profile || listeningLogLoaded || listeningLogLoading) {
       return;
@@ -790,39 +1533,282 @@ export function App() {
   }, [appPage, listeningLogLoaded, listeningLogLoading, profile, recentDebugSourceFilter]);
 
   useEffect(() => {
-    if (appPage !== "tracksOnly" || !profile || mergedTracksLoading || mergedTracksLoaded) {
+    if (appPage !== "formulaLab" || !profile) {
+      return;
+    }
+    if (!mergedTracksLoaded && !mergedTracksLoading) {
+      void loadMergedTrackRankings();
+    }
+  }, [
+    appPage,
+    mergedTracksLoaded,
+    mergedTracksLoading,
+    profile,
+  ]);
+
+  useEffect(() => {
+    if (appPage !== "searchLookup" || !profile) {
+      return;
+    }
+    if (searchLookupEntityType === "duplicate_albums" && !albumDuplicateLookupLoaded && !albumDuplicateLookupLoading) {
+      void loadAlbumDuplicateLookup(true);
+      return;
+    }
+    if (searchLookupEntityType === "tracks" && !trackCatalogLookupLoaded && !trackCatalogLookupLoading) {
+      void loadTrackCatalogLookup(true);
+      return;
+    }
+    if (searchLookupEntityType === "albums" && !albumCatalogLookupLoaded && !albumCatalogLookupLoading) {
+      void loadAlbumCatalogLookup(true);
+    }
+  }, [
+    appPage,
+    profile,
+    searchLookupEntityType,
+    albumCatalogLookupLoaded,
+    albumCatalogLookupLoading,
+    trackCatalogLookupLoaded,
+    trackCatalogLookupLoading,
+    albumDuplicateLookupLoaded,
+    albumDuplicateLookupLoading,
+  ]);
+
+  useEffect(() => {
+    if (appPage !== "catalogBackfill" || !profile) {
+      return;
+    }
+    if (!catalogBackfillCoverageLoaded && !catalogBackfillCoverageLoading) {
+      void loadCatalogBackfillCoverage();
+    }
+    if (!catalogBackfillRunsLoaded && !catalogBackfillRunsLoading) {
+      void loadCatalogBackfillRuns();
+    }
+    if (!catalogBackfillQueueLoaded && !catalogBackfillQueueLoading) {
+      void loadCatalogBackfillQueue();
+    }
+  }, [
+    appPage,
+    profile,
+    catalogBackfillCoverageLoaded,
+    catalogBackfillCoverageLoading,
+    catalogBackfillRunsLoaded,
+    catalogBackfillRunsLoading,
+    catalogBackfillQueueLoaded,
+    catalogBackfillQueueLoading,
+  ]);
+
+  useEffect(() => {
+    if (appPage !== "identityAudit" || !profile) {
+      return;
+    }
+    if (!identityAuditLoaded && !identityAuditLoading) {
+      void loadIdentityAudit();
+    }
+    if (!identityAuditSuggestedLoaded && !identityAuditSuggestedLoading) {
+      void loadIdentityAuditSuggestedGroups();
+    }
+    if (!identityAuditAmbiguousLoaded && !identityAuditAmbiguousLoading) {
+      void loadIdentityAuditAmbiguousReview();
+    }
+    if (!identityAuditSavedSubmissions && !identityAuditSavedSubmissionsLoading) {
+      void loadIdentityAuditSavedSubmissions();
+    }
+  }, [
+    appPage,
+    identityAuditAmbiguousLoaded,
+    identityAuditAmbiguousLoading,
+    identityAuditLoaded,
+    identityAuditLoading,
+    identityAuditSuggestedLoaded,
+    identityAuditSuggestedLoading,
+    identityAuditSavedSubmissions,
+    identityAuditSavedSubmissionsLoading,
+    profile,
+  ]);
+
+  useEffect(() => {
+    setIdentityAuditSavedSubmissionDryRun(null);
+    setIdentityAuditSavedSubmissionDryRunError("");
+    setIdentityAuditSavedSubmissionDryRunLoading(false);
+    setIdentityAuditSavedSubmissionDryRunAt(null);
+  }, [identityAuditSavedSubmissionDetail?.item.id]);
+
+  useEffect(() => {
+    setIdentityAuditAmbiguousVisibleCount(IDENTITY_AUDIT_AMBIGUOUS_VISIBLE_STEP);
+  }, [identityAuditAmbiguousFamilyFilter, identityAuditAmbiguousBucketFilter]);
+
+  useEffect(() => {
+    setIdentityAuditPreviewValidationResult(null);
+    setIdentityAuditPreviewValidationError("");
+    setIdentityAuditPreviewValidatedAt(null);
+    setIdentityAuditSubmissionSaveLoading(false);
+    setIdentityAuditSubmissionSaveError("");
+    setIdentityAuditSubmissionSaveResult(null);
+  }, [identityAuditLocalDecisions]);
+
+  useEffect(() => {
+    if (appPage !== "identityAudit" || identityAuditTab !== "family") {
+      return;
+    }
+    const unifiedItems = computeUnifiedReviewItems();
+    if (unifiedItems.length === 0) {
+      if (identityAuditFocusedReviewKey != null) {
+        setIdentityAuditFocusedReviewKey(null);
+      }
+      return;
+    }
+    const hasCurrentFocus = identityAuditFocusedReviewKey != null
+      && unifiedItems.some((item) => item.decision_key === identityAuditFocusedReviewKey);
+    const focusedReviewed = hasCurrentFocus
+      ? isReviewedDecision(identityAuditLocalDecisions[identityAuditFocusedReviewKey as string])
+      : false;
+    if (!hasCurrentFocus || focusedReviewed) {
+      const nextKey = findNextUnreviewedDecisionKey(unifiedItems, identityAuditFocusedReviewKey);
+      setIdentityAuditFocusedReviewKey(nextKey);
+    }
+  }, [
+    appPage,
+    identityAuditTab,
+    identityAuditFocusedReviewKey,
+    identityAuditLocalDecisions,
+    identityAuditSuggestedGroups,
+    identityAuditAmbiguous,
+    identityAuditAmbiguousFamilyFilter,
+    identityAuditAmbiguousBucketFilter,
+  ]);
+
+  useEffect(() => {
+    if (appPage !== "identityAudit" || identityAuditTab !== "family") {
       return;
     }
 
-    let cancelled = false;
-    setMergedTracksLoading(true);
-    setMergedTracksError("");
-    void fetchMergedTrackAggregate()
-      .then((data) => {
-        if (cancelled) {
-          return;
-        }
-        setMergedTracks(data.items);
-        setMergedTracksExcludedUnknownCount(Math.max(0, data.excluded_unknown_identity_count ?? 0));
-        setMergedTracksLoaded(true);
-      })
-      .catch((error: unknown) => {
-        if (cancelled) {
-          return;
-        }
-        setMergedTracksError(formatUiErrorMessage(error, "Failed to load merged tracks."));
-      })
-      .finally(() => {
-        if (cancelled) {
-          return;
-        }
-        setMergedTracksLoading(false);
-      });
+    function onKeydown(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null;
+      const isTypingTarget = Boolean(
+        target
+        && (
+          target.tagName === "INPUT"
+          || target.tagName === "TEXTAREA"
+          || target.tagName === "SELECT"
+          || target.isContentEditable
+        )
+      );
+      if (isTypingTarget) {
+        return;
+      }
+      if (event.metaKey || event.ctrlKey || event.altKey) {
+        return;
+      }
 
-    return () => {
-      cancelled = true;
-    };
-  }, [appPage, mergedTracksLoaded, mergedTracksLoading, profile]);
+      const unifiedItems = computeUnifiedReviewItems();
+      if (unifiedItems.length === 0) {
+        return;
+      }
+      const focusedKey = identityAuditFocusedReviewKey ?? findNextUnreviewedDecisionKey(unifiedItems);
+
+      if (event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        setIdentityAuditFocusedReviewKey(findNextUnreviewedDecisionKey(unifiedItems, focusedKey));
+        return;
+      }
+
+      if (!focusedKey) {
+        return;
+      }
+
+      if (event.key.toLowerCase() === "a") {
+        event.preventDefault();
+        const nextDecisions = {
+          ...identityAuditLocalDecisions,
+          [focusedKey]: {
+            verdict: "good_to_group" as LocalReviewVerdict,
+            grouping_target: identityAuditLocalDecisions[focusedKey]?.grouping_target ?? "same_composition",
+            note: identityAuditLocalDecisions[focusedKey]?.note ?? "",
+            updated_at_ms: Date.now(),
+          },
+        };
+        updateLocalReviewDecision(focusedKey, {
+          verdict: "good_to_group",
+          grouping_target: identityAuditLocalDecisions[focusedKey]?.grouping_target ?? "same_composition",
+        });
+        setIdentityAuditFocusedReviewKey(findNextUnreviewedDecisionKey(unifiedItems, focusedKey, nextDecisions));
+        return;
+      }
+
+      if (event.key.toLowerCase() === "r") {
+        event.preventDefault();
+        const nextDecisions = {
+          ...identityAuditLocalDecisions,
+          [focusedKey]: {
+            verdict: "not_good" as LocalReviewVerdict,
+            grouping_target: null,
+            note: identityAuditLocalDecisions[focusedKey]?.note ?? "",
+            updated_at_ms: Date.now(),
+          },
+        };
+        updateLocalReviewDecision(focusedKey, {
+          verdict: "not_good",
+          grouping_target: null,
+        });
+        setIdentityAuditFocusedReviewKey(findNextUnreviewedDecisionKey(unifiedItems, focusedKey, nextDecisions));
+        return;
+      }
+
+      if (event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        const nextDecisions = {
+          ...identityAuditLocalDecisions,
+          [focusedKey]: {
+            verdict: "skipped" as LocalReviewVerdict,
+            grouping_target: null,
+            note: identityAuditLocalDecisions[focusedKey]?.note ?? "",
+            updated_at_ms: Date.now(),
+          },
+        };
+        updateLocalReviewDecision(focusedKey, {
+          verdict: "skipped",
+          grouping_target: null,
+        });
+        setIdentityAuditFocusedReviewKey(findNextUnreviewedDecisionKey(unifiedItems, focusedKey, nextDecisions));
+      }
+    }
+
+    window.addEventListener("keydown", onKeydown);
+    return () => window.removeEventListener("keydown", onKeydown);
+  }, [
+    appPage,
+    identityAuditTab,
+    identityAuditFocusedReviewKey,
+    identityAuditLocalDecisions,
+    identityAuditSuggestedGroups,
+    identityAuditAmbiguous,
+    identityAuditAmbiguousFamilyFilter,
+    identityAuditAmbiguousBucketFilter,
+  ]);
+
+  useEffect(() => {
+    if (appPage !== "identityAudit" || identityAuditTab !== "release") {
+      return;
+    }
+    if (!albumDuplicateLookupLoaded && !albumDuplicateLookupLoading) {
+      void loadAlbumDuplicateLookup(true);
+    }
+    if (!albumNameDuplicateLookupLoaded && !albumNameDuplicateLookupLoading) {
+      void loadAlbumNameDuplicateLookup(true);
+    }
+    if (!trackDuplicateLookupLoaded && !trackDuplicateLookupLoading) {
+      void loadTrackDuplicateLookup(true);
+    }
+  }, [
+    appPage,
+    identityAuditTab,
+    albumDuplicateLookupLoaded,
+    albumDuplicateLookupLoading,
+    albumNameDuplicateLookupLoaded,
+    albumNameDuplicateLookupLoading,
+    trackDuplicateLookupLoaded,
+    trackDuplicateLookupLoading,
+  ]);
 
   useEffect(() => {
     if (
@@ -1135,6 +2121,9 @@ export function App() {
       if (!brandMenuRef.current?.contains(event.target as Node)) {
         setBrandMenuOpen(false);
       }
+      if (!experimentalMenuRef.current?.contains(event.target as Node)) {
+        setExperimentalMenuOpen(false);
+      }
       if (!playerMenuRef.current?.contains(event.target as Node)) {
         setPlayerMenuOpen(false);
       }
@@ -1154,6 +2143,7 @@ export function App() {
       if (event.key === "Escape") {
         setSelectedPreview(null);
         setRateLimitMenuOpen(false);
+        setExperimentalMenuOpen(false);
       }
     }
 
@@ -1219,7 +2209,12 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
 
-    if (experienceMode === "local" || !selectedPreview || selectedPreview.kind !== "track" || spotifyCooldownActive) {
+    if (
+      experienceMode === "local"
+      || !selectedPreview
+      || (selectedPreview.kind !== "track" && selectedPreview.kind !== "album")
+      || spotifyCooldownActive
+    ) {
       loadedAlbumTracksAlbumIdRef.current = null;
       setAlbumTrackEntries([]);
       setAlbumTrackEntriesLoading(false);
@@ -1229,8 +2224,10 @@ export function App() {
       };
     }
 
-    const selectedTrackId = selectedPreview.trackId ?? selectedPreview.entityId;
-    const albumId = selectedPreview.albumId ?? selectedPreview.sourceTrack?.album_id ?? null;
+    const selectedTrackId = selectedPreview.kind === "track"
+      ? (selectedPreview.trackId ?? selectedPreview.entityId)
+      : null;
+    const albumId = selectedPreview.albumId ?? selectedPreview.sourceTrack?.album_id ?? selectedPreview.entityId ?? null;
     if (!albumId) {
       loadedAlbumTracksAlbumIdRef.current = null;
       setAlbumTrackEntries([]);
@@ -2091,7 +3088,7 @@ export function App() {
   }
 
   function openAlbumTrackPreview(track: AlbumTrackEntry) {
-    if (!selectedPreview || selectedPreview.kind !== "track") {
+    if (!selectedPreview || (selectedPreview.kind !== "track" && selectedPreview.kind !== "album")) {
       return;
     }
     const previewTrackUri = trackUriWithFallback(track.uri, track.id);
@@ -2107,7 +3104,7 @@ export function App() {
       trackUri: previewTrackUri,
       url: previewTrackUrl,
       trackId: track.id ?? null,
-      albumId: selectedPreview.albumId ?? selectedPreview.sourceTrack?.album_id ?? null,
+      albumId: selectedPreview.albumId ?? selectedPreview.sourceTrack?.album_id ?? selectedPreview.entityId ?? null,
       artistName: track.artistName ?? track.sourceTrack?.artist_name ?? selectedPreview.artistName ?? null,
       sourceTrack: track.sourceTrack ?? selectedPreview.sourceTrack ?? null,
     });
@@ -2669,6 +3666,7 @@ export function App() {
   }
 
   function toggleSection(section: SectionKey, anchorId?: string) {
+    setExperimentalMenuOpen(false);
     const isCurrentlyOpen = openSections[section];
     if (isCurrentlyOpen && anchorId) {
       const element = document.getElementById(anchorId);
@@ -2701,8 +3699,254 @@ export function App() {
     }));
   }
 
+  function openListeningLogPage() {
+    setListeningLogTracks([]);
+    setListeningLogHasMore(false);
+    setListeningLogOffset(0);
+    setListeningLogLoaded(false);
+    setListeningLogLoading(false);
+    setListeningLogError("");
+    setListeningLogLastLoadedAt(null);
+    setOpenDebugSessions({});
+    setOpenDebugTracks({});
+    setExperimentalMenuOpen(false);
+    setAppPage("recentDebug");
+  }
+
+  function openFormulaLabPage() {
+    setMergedTracks([]);
+    setMergedTracksLoaded(false);
+    setMergedTracksLoading(false);
+    setMergedTracksError("");
+    setMergedTracksExcludedUnknownCount(0);
+    setMergedTracksLastLoadedAt(null);
+    setExperimentalMenuOpen(false);
+    setAppPage("formulaLab");
+  }
+
+  function openIdentityAuditPage() {
+    setIdentityAudit(null);
+    setIdentityAuditLoaded(false);
+    setIdentityAuditLoading(false);
+    setIdentityAuditError("");
+    setIdentityAuditLastLoadedAt(null);
+    setIdentityAuditSuggestedGroups(null);
+    setIdentityAuditSuggestedLoaded(false);
+    setIdentityAuditSuggestedLoading(false);
+    setIdentityAuditSuggestedError("");
+    setIdentityAuditSuggestedLastLoadedAt(null);
+    setIdentityAuditAmbiguous(null);
+    setIdentityAuditAmbiguousLoaded(false);
+    setIdentityAuditAmbiguousLoading(false);
+    setIdentityAuditAmbiguousError("");
+    setIdentityAuditAmbiguousLastLoadedAt(null);
+    setAlbumDuplicateLookupResult(null);
+    setAlbumDuplicateLookupLoading(false);
+    setAlbumDuplicateLookupLoaded(false);
+    setAlbumDuplicateLookupError("");
+    setAlbumDuplicateLookupLastLoadedAt(null);
+    setAlbumNameDuplicateLookupResult(null);
+    setAlbumNameDuplicateLookupLoading(false);
+    setAlbumNameDuplicateLookupLoaded(false);
+    setAlbumNameDuplicateLookupError("");
+    setAlbumNameDuplicateLookupLastLoadedAt(null);
+    setTrackDuplicateLookupResult(null);
+    setTrackDuplicateLookupLoading(false);
+    setTrackDuplicateLookupLoaded(false);
+    setTrackDuplicateLookupError("");
+    setTrackDuplicateLookupLastLoadedAt(null);
+    setIdentityAuditTab("overview");
+    setExperimentalMenuOpen(false);
+    setAppPage("identityAudit");
+  }
+
+  function openCatalogBackfillPage() {
+    setCatalogBackfillCoverage(null);
+    setCatalogBackfillCoverageLoading(false);
+    setCatalogBackfillCoverageLoaded(false);
+    setCatalogBackfillCoverageError("");
+    setCatalogBackfillCoverageLastLoadedAt(null);
+    setCatalogBackfillRuns(null);
+    setCatalogBackfillRunsLoading(false);
+    setCatalogBackfillRunsLoaded(false);
+    setCatalogBackfillRunsError("");
+    setCatalogBackfillRunsLastLoadedAt(null);
+    setCatalogBackfillQueue(null);
+    setCatalogBackfillQueueLoading(false);
+    setCatalogBackfillQueueLoaded(false);
+    setCatalogBackfillQueueError("");
+    setCatalogBackfillQueueLastLoadedAt(null);
+    setCatalogBackfillQueueStatusFilter("all");
+    setCatalogBackfillTab("recentRuns");
+    setCatalogBackfillQueueRepairLoading(false);
+    setCatalogBackfillQueueRepairMessage("");
+    setCatalogBackfillRunLoading(false);
+    setCatalogBackfillRunError("");
+    setCatalogBackfillLatestResult(null);
+    setCatalogBackfillLimit(25);
+    setCatalogBackfillOffset(0);
+    setCatalogBackfillMarket("US");
+    setCatalogBackfillIncludeAlbums(true);
+    setCatalogBackfillForceRefresh(false);
+    setCatalogBackfillRequestDelaySeconds(0.5);
+    setCatalogBackfillMaxRuntimeSeconds(60);
+    setCatalogBackfillMaxRequests(150);
+    setCatalogBackfillMaxErrors(10);
+    setCatalogBackfillMaxAlbumTracksPagesPerAlbum(10);
+    setCatalogBackfillMax429(3);
+    setExperimentalMenuOpen(false);
+    setAppPage("catalogBackfill");
+  }
+
+  function openSearchLookupPage() {
+    setSearchLookupEntityType("albums");
+    setSearchLookupQueueStatus("all");
+    setSearchLookupSort("default");
+    setAlbumCatalogLookupQ("");
+    setAlbumCatalogLookupStatus("all");
+    setAlbumCatalogLookupResult(null);
+    setAlbumCatalogLookupLoading(false);
+    setAlbumCatalogLookupLoaded(false);
+    setAlbumCatalogLookupError("");
+    setAlbumCatalogLookupLastLoadedAt(null);
+    setTrackCatalogLookupStatus("all");
+    setTrackCatalogLookupResult(null);
+    setTrackCatalogLookupLoading(false);
+    setTrackCatalogLookupLoaded(false);
+    setTrackCatalogLookupError("");
+    setTrackCatalogLookupLastLoadedAt(null);
+    setAlbumDuplicateLookupResult(null);
+    setAlbumDuplicateLookupLoading(false);
+    setAlbumDuplicateLookupLoaded(false);
+    setAlbumDuplicateLookupError("");
+    setAlbumDuplicateLookupLastLoadedAt(null);
+    setAlbumCatalogLookupEnqueueLoading(false);
+    setAlbumCatalogLookupEnqueueError("");
+    setAlbumCatalogLookupEnqueueResult(null);
+    setExperimentalMenuOpen(false);
+    setAppPage("searchLookup");
+  }
+
+  function albumLookupRowIsNotBackfilled(item: AlbumCatalogLookupItem): boolean {
+    return item.catalog_fetched_at === null && item.catalog_last_status === null && item.catalog_last_error === null;
+  }
+
+  function albumLookupRowHasCatalogError(item: AlbumCatalogLookupItem): boolean {
+    return item.catalog_last_status === "error" || Boolean(item.catalog_last_error);
+  }
+
+  function albumLookupStatusLabel(item: AlbumCatalogLookupItem): "Complete" | "Missing metadata" | "Tracklist incomplete" | "Error" {
+    if (albumLookupRowHasCatalogError(item)) {
+      return "Error";
+    }
+    if (albumLookupRowIsNotBackfilled(item)) {
+      return "Missing metadata";
+    }
+    if (!item.tracklist_complete) {
+      return "Tracklist incomplete";
+    }
+    return "Complete";
+  }
+
+  function albumLookupRowIsIncompleteForEnqueue(item: AlbumCatalogLookupItem): boolean {
+    if (!item.spotify_album_id) {
+      return false;
+    }
+    return albumLookupRowIsNotBackfilled(item) || !item.tracklist_complete || albumLookupRowHasCatalogError(item);
+  }
+
+  function rowIsPendingQueue(queueStatus: string | null | undefined): boolean {
+    return String(queueStatus ?? "").trim().toLowerCase() === "pending";
+  }
+
+  function queueStatusLabel(queueStatus: string | null | undefined): "Not queued" | "Pending" | "Done" | "Error" {
+    const normalized = String(queueStatus ?? "").trim().toLowerCase();
+    if (normalized === "pending") {
+      return "Pending";
+    }
+    if (normalized === "done") {
+      return "Done";
+    }
+    if (normalized === "error") {
+      return "Error";
+    }
+    return "Not queued";
+  }
+
+  function albumLookupRowCanBulkPrioritize(item: AlbumCatalogLookupItem): boolean {
+    return albumLookupRowIsIncompleteForEnqueue(item) && !rowIsPendingQueue(item.queue_status);
+  }
+
+  function trackLookupRowHasCatalogError(item: TrackCatalogLookupItem): boolean {
+    return item.catalog_last_status === "error" || Boolean(item.catalog_last_error);
+  }
+
+  function trackLookupRowIsNotBackfilled(item: TrackCatalogLookupItem): boolean {
+    return item.catalog_fetched_at === null && item.catalog_last_status === null && item.catalog_last_error === null;
+  }
+
+  function trackLookupStatusLabel(item: TrackCatalogLookupItem): "Complete" | "Missing duration" | "Missing metadata" | "Error" {
+    if (trackLookupRowHasCatalogError(item)) {
+      return "Error";
+    }
+    if (trackLookupRowIsNotBackfilled(item)) {
+      return "Missing metadata";
+    }
+    if (item.duration_ms === null) {
+      return "Missing duration";
+    }
+    return "Complete";
+  }
+
+  function trackLookupRowIsIncompleteForEnqueue(item: TrackCatalogLookupItem): boolean {
+    if (!item.spotify_track_id) {
+      return false;
+    }
+    const statusLabel = trackLookupStatusLabel(item);
+    return statusLabel === "Missing metadata" || statusLabel === "Missing duration" || statusLabel === "Error";
+  }
+
+  function trackLookupRowCanBulkPrioritize(item: TrackCatalogLookupItem): boolean {
+    return trackLookupRowIsIncompleteForEnqueue(item) && !rowIsPendingQueue(item.queue_status);
+  }
+
+  function openAlbumLookupPreview(item: AlbumCatalogLookupItem) {
+    const spotifyAlbumId = item.spotify_album_id ?? null;
+    setSelectedPreview({
+      image: null,
+      fallbackLabel: "L",
+      label: item.release_album_name,
+      meta: item.artist_name ?? null,
+      detail: item.release_date ?? null,
+      kind: "album",
+      entityId: spotifyAlbumId,
+      trackUri: null,
+      url: spotifyAlbumId ? `https://open.spotify.com/album/${spotifyAlbumId}` : "",
+      trackId: null,
+      albumId: spotifyAlbumId,
+      artistName: item.artist_name ?? null,
+      sourceTrack: null,
+    });
+  }
+
   function normalizedTrackArtistKey(trackName: string | null | undefined, artistName: string | null | undefined) {
     return `${(trackName ?? "").trim().toLowerCase()}::${(artistName ?? "").trim().toLowerCase()}`;
+  }
+
+  function formulaTrackKey(track: RecentTrack) {
+    return (
+      track.track_id
+      ?? track.uri
+      ?? normalizedTrackArtistKey(track.track_name, track.artist_name)
+    );
+  }
+
+  function formatFormulaRankDelta(track: RecentTrack): string | null {
+    const delta = Number(track.formula_rank_delta ?? 0);
+    if (!Number.isFinite(delta) || delta === 0) {
+      return null;
+    }
+    return delta > 0 ? `+${delta}` : String(delta);
   }
 
   function renderTrackRankingToggle() {
@@ -2823,7 +4067,25 @@ export function App() {
     );
   }
 
+  function renderRankMovementFilterToggle() {
+    return (
+      <div className="track-ranking-toggle" role="group" aria-label="Formula rank movement filter">
+        {RANK_MOVEMENT_FILTER_OPTIONS.map((option) => (
+          <button
+            className={`track-ranking-chip${rankMovementFilter === option.value ? " track-ranking-chip-active" : ""}`}
+            key={option.value}
+            onClick={() => setRankMovementFilter(option.value)}
+            type="button"
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+    );
+  }
+
   function openAndScrollToSection(section: SectionKey, anchorId: string) {
+    setExperimentalMenuOpen(false);
     setAppPage("dashboard");
     setOpenSections((current) => ({
       ...current,
@@ -3061,6 +4323,26 @@ export function App() {
     return longevityMetric;
   }
 
+  function baselineFormulaLabel() {
+    if (trackRankingMode === "plays") {
+      return "raw plays";
+    }
+    if (trackRankingMode === "longevity") {
+      return "linear longevity";
+    }
+    return "linear blend";
+  }
+
+  function candidateFormulaLabel() {
+    if (trackRankingMode === "plays") {
+      return "recent-boosted plays";
+    }
+    if (trackRankingMode === "longevity") {
+      return "recent-boosted longevity";
+    }
+    return "recent-boosted blend";
+  }
+
   function formatTrackLongevityWithConsistency(track: RecentTrack) {
     const longevity = formatTrackLongevity(track);
     const consistency = Math.max(0, Math.min(1, Number(track.consistency_ratio ?? 0)));
@@ -3088,7 +4370,8 @@ export function App() {
 
   function getNewPlaysScore(track: RecentTrack, maxPlays: number): number {
     const normalized = getTrackPlayCount(track) / Math.max(1, maxPlays);
-    return Math.sqrt(normalized);
+    const recentBoost = Number(track.recent_play_count ?? 0) > 0 ? 0.35 : 0;
+    return Math.sqrt(normalized) * 0.65 + recentBoost;
   }
 
   function getOldLongevityScore(track: RecentTrack, maxLongevity: number): number {
@@ -3097,7 +4380,8 @@ export function App() {
 
   function getNewLongevityScore(track: RecentTrack, maxLongevity: number): number {
     const normalized = getTrackLongevityScore(track) / Math.max(1, maxLongevity);
-    return Math.sqrt(normalized);
+    const recentBoost = Number(track.recent_play_count ?? 0) > 0 ? 0.25 : 0;
+    return Math.sqrt(normalized) * 0.75 + recentBoost;
   }
 
   function getOldMixScore(
@@ -3799,7 +5083,13 @@ export function App() {
     setMergedTracksLoading(false);
     setMergedTracksError("");
     setMergedTracksExcludedUnknownCount(0);
+    setMergedTracksLastLoadedAt(null);
     setMergedTrackSourceFilter("all");
+    setIdentityAudit(null);
+    setIdentityAuditLoading(false);
+    setIdentityAuditLoaded(false);
+    setIdentityAuditError("");
+    setIdentityAuditLastLoadedAt(null);
   }
 
   function renderPaging(section: SectionKey, itemCount: number) {
@@ -3985,6 +5275,7 @@ export function App() {
     unavailableCopy: string,
     unavailableAction?: ReactNode,
     paged: boolean = true,
+    presorted: boolean = false,
   ) {
     if (!available) {
       return (
@@ -3998,11 +5289,16 @@ export function App() {
       return <p className="empty-copy">{emptyCopy}</p>;
     }
 
-    const rankedItems = sortedTracksForView(section, items);
+    const rankedItems = presorted ? items : sortedTracksForView(section, items);
     const isAllTimeTrackSection =
       section === "tracksAllTime" ||
       section === "tracksAllTimeCurrent" ||
       section === "tracksAllTimeNew";
+    const showSourceBadge = section !== "tracksAllTimeCurrent" && section !== "tracksAllTimeNew";
+    const formulaRankDeltaText = (track: RecentTrack) =>
+      section === "tracksAllTimeCurrent" || section === "tracksAllTimeNew"
+        ? formatFormulaRankDelta(track)
+        : null;
 
     const cappedRows = isAllTimeTrackSection || section === "tracksRecent"
       ? capTracksPerAlbum(rankedItems, 1)
@@ -4020,7 +5316,7 @@ export function App() {
                 imageAlt: `${row.track.album_name ?? row.track.track_name ?? "Album"} cover`,
                 fallbackLabel: "T",
                 primaryText: row.track.track_name ?? "Unknown track",
-                primaryBadgeText: formatTrackSourceBadge(row.track),
+                primaryBadgeText: formulaRankDeltaText(row.track) ?? (showSourceBadge ? formatTrackSourceBadge(row.track) : null),
                 secondaryBadgeText: row.hiddenCount > 0 ? `+${row.hiddenCount} more` : null,
                 secondaryText: row.track.artist_name ?? "Unknown artist",
                 tertiaryText: row.track.album_name ?? "Unknown album",
@@ -4046,7 +5342,7 @@ export function App() {
     );
   }
 
-  function renderTracksOnlyPage() {
+  function renderFormulaLabPage() {
     if (!profile) {
       return null;
     }
@@ -4063,28 +5359,80 @@ export function App() {
       }
       return true;
     });
-    const filteredTrackCount = filteredMergedTracks.length;
-    const sourceFilterLabel = MERGED_TRACK_SOURCE_FILTER_OPTIONS.find((option) => option.value === mergedTrackSourceFilter)?.label ?? "All";
+    const baselineRankedTracks = sortedTracksForView("tracksAllTimeCurrent", filteredMergedTracks);
+    const candidateRankedTracks = sortedTracksForView("tracksAllTimeNew", filteredMergedTracks);
+    const baselineRankByTrackKey = new Map(
+      baselineRankedTracks.map((track, index) => [formulaTrackKey(track), index + 1]),
+    );
+    const candidateRankByTrackKey = new Map(
+      candidateRankedTracks.map((track, index) => [formulaTrackKey(track), index + 1]),
+    );
+    const annotateRankMovement = (track: RecentTrack): RecentTrack => {
+      const key = formulaTrackKey(track);
+      const baselineRank = baselineRankByTrackKey.get(key);
+      const candidateRank = candidateRankByTrackKey.get(key);
+      const delta = baselineRank != null && candidateRank != null ? baselineRank - candidateRank : 0;
+      return { ...track, formula_rank_delta: delta };
+    };
+    const rankMovementMatches = (track: RecentTrack) => {
+      const delta = Number(track.formula_rank_delta ?? 0);
+      if (rankMovementFilter === "risers") {
+        return delta > 0;
+      }
+      if (rankMovementFilter === "fallers") {
+        return delta < 0;
+      }
+      return true;
+    };
+    const baselineDisplayTracks = baselineRankedTracks
+      .map(annotateRankMovement)
+      .filter(rankMovementMatches);
+    const candidateDisplayTracks = candidateRankedTracks
+      .map(annotateRankMovement)
+      .filter(rankMovementMatches);
+    const movementFilteredTracks = filteredMergedTracks
+      .map(annotateRankMovement)
+      .filter((track) => {
+        return rankMovementMatches(track);
+      });
+    const filteredTrackCount = movementFilteredTracks.length;
+    const sourceFilterLabel = MERGED_TRACK_SOURCE_FILTER_OPTIONS.find((option) => option.value === mergedTrackSourceFilter)?.label ?? "All plays";
+    const rankMovementLabel = RANK_MOVEMENT_FILTER_OPTIONS.find((option) => option.value === rankMovementFilter)?.label ?? "All";
     const mergedTrackEmptyCopy = mergedTracksLoaded
-      ? `No ${sourceFilterLabel.toLowerCase()} tracks were returned from the merged aggregate.`
-      : "Loading merged tracks...";
+      ? `No ${sourceFilterLabel.toLowerCase()} tracks are available for this comparison.`
+      : "Loading track rankings...";
     const mergedTrackUnavailableCopy = mergedTracksLoading
-      ? "Loading merged tracks..."
-      : (mergedTracksError || "Merged tracks are not available yet.");
+      ? "Loading track rankings..."
+      : (mergedTracksError || "Track rankings are not available yet.");
+    const formulaModeLabel =
+      trackRankingMode === "plays"
+        ? "plays"
+        : trackRankingMode === "longevity"
+          ? "longevity"
+          : "mix";
 
     return (
       <section className="info-card info-card-wide tracks-only-card" id="tracks-page">
         <div className="tracks-only-header">
           <div className="section-column-header tracks-only-header-copy">
             <div>
-              <h2>Tracks</h2>
+              <h2>Top Tracks Formula Lab</h2>
               <p className="tracks-only-subtitle">
-                Merged play-event aggregate with source provenance.
+                Compare canonical track rankings built from merged play history.
               </p>
             </div>
             <div className="section-column-header-actions tracks-only-controls">
               {renderMergedTrackSourceFilterToggle()}
               {renderTrackRankingToggle()}
+              {renderRankMovementFilterToggle()}
+              <button
+                className="secondary-button tracks-page-link-button"
+                disabled={mergedTracksLoading}
+                onClick={reloadTrackRankings}
+                type="button"
+              >
+                {mergedTracksLoading ? "Reloading..." : "Reload rankings"}
+              </button>
             </div>
           </div>
           <button
@@ -4095,10 +5443,13 @@ export function App() {
             Back to dashboard
           </button>
         </div>
-        <div className="tracks-only-diagnostics">
-          <span>{filteredTrackCount} visible tracks</span>
-          {mergedTracksExcludedUnknownCount > 0 ? (
-            <span>{mergedTracksExcludedUnknownCount} unknown-identity events excluded</span>
+        <div className="tracks-only-summary">
+          <span>{filteredTrackCount} tracks in comparison</span>
+          <span>{formulaModeLabel} mode</span>
+          <span>{rankMovementLabel}</span>
+          <span>{sourceFilterLabel}</span>
+          {mergedTracksLastLoadedAt ? (
+            <span>Loaded {new Date(mergedTracksLastLoadedAt).toLocaleTimeString()}</span>
           ) : null}
         </div>
         {mergedTracksError ? (
@@ -4110,29 +5461,2453 @@ export function App() {
         ) : null}
         <div className="artists-grid">
           <div className="artists-column">
-            <h3>Current formula</h3>
+            <div className="tracks-formula-heading">
+              <h3>Baseline formula</h3>
+              <span>{baselineFormulaLabel()}</span>
+            </div>
             {renderTrackColumn(
               "tracksAllTimeCurrent",
-              filteredMergedTracks,
+              baselineDisplayTracks,
               mergedTracksLoaded && !mergedTracksLoading && !mergedTracksError,
               mergedTrackEmptyCopy,
               mergedTrackUnavailableCopy,
               undefined,
               false,
+              true,
             )}
           </div>
           <div className="artists-column">
-            <h3>New formula</h3>
+            <div className="tracks-formula-heading">
+              <h3>Candidate formula</h3>
+              <span>{candidateFormulaLabel()}</span>
+            </div>
             {renderTrackColumn(
               "tracksAllTimeNew",
-              filteredMergedTracks,
+              candidateDisplayTracks,
               mergedTracksLoaded && !mergedTracksLoading && !mergedTracksError,
               mergedTrackEmptyCopy,
               mergedTrackUnavailableCopy,
               undefined,
               false,
+              true,
             )}
           </div>
+        </div>
+      </section>
+    );
+  }
+
+  function identityAuditTitle(example: TrackIdentityAuditExample): string {
+    const candidates = [
+      example.track_name,
+      example.release_track_name,
+      example.analysis_track_name,
+      example.artist_name,
+      example.grouping_note,
+      example.example_type,
+    ];
+    const title = candidates.find((value) => typeof value === "string" && value.trim().length > 0);
+    return typeof title === "string" ? title : "Identity example";
+  }
+
+  function identityAuditMeta(example: TrackIdentityAuditExample): string {
+    const parts = [
+      typeof example.artist_name === "string" ? example.artist_name : null,
+      typeof example.listen_count === "number" ? `${example.listen_count} listens` : null,
+      typeof example.folded_listen_count === "number" ? `${example.folded_listen_count} folded listens` : null,
+      typeof example.spotify_track_id_count === "number" ? `${example.spotify_track_id_count} Spotify IDs` : null,
+      typeof example.source_track_count === "number" ? `${example.source_track_count} source tracks` : null,
+      typeof example.release_track_count === "number" ? `${example.release_track_count} release tracks` : null,
+    ];
+    return parts.filter(Boolean).join(" | ");
+  }
+
+  function auditString(value: unknown, fallback: string = "Unknown") {
+    return typeof value === "string" && value.trim().length > 0 ? value : fallback;
+  }
+
+  function auditNumber(value: unknown): number | null {
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  }
+
+  function auditList(value: unknown): TrackIdentityAuditExample[] {
+    return Array.isArray(value) ? value.filter((item): item is TrackIdentityAuditExample => Boolean(item) && typeof item === "object" && !Array.isArray(item)) : [];
+  }
+
+  function renderAuditStat(label: string, value: unknown) {
+    if (value == null || value === "") {
+      return null;
+    }
+    return (
+      <span className="identity-audit-stat">
+        <span>{label}</span>
+        <strong>{String(value)}</strong>
+      </span>
+    );
+  }
+
+  function renderAuditVariantList(items: TrackIdentityAuditExample[], kind: "canonical" | "release" | "composition") {
+    if (items.length === 0) {
+      return <p className="empty-copy">No variants returned.</p>;
+    }
+    return (
+      <div className="identity-audit-variant-list">
+        {items.map((item, index) => {
+          const title = kind === "composition"
+            ? auditString(item.release_track_name, "Release track")
+            : auditString(item.track_name ?? item.source_name_raw, "Variant");
+          const subtitle = kind === "canonical"
+            ? auditString(item.album_name, "Unknown album")
+            : kind === "release"
+              ? auditString(item.match_method, "Mapping")
+              : auditString(item.status, "Suggestion");
+          const listens = auditNumber(item.listen_count);
+          const confidence = auditNumber(item.confidence);
+          const idText = kind === "composition"
+            ? `release ${auditString(item.release_track_id, "n/a")}`
+            : auditString(item.spotify_track_id ?? item.external_id, "No Spotify ID");
+          return (
+            <div className="identity-audit-variant" key={`${idText}-${index}`}>
+              <div className="identity-audit-variant-main">
+                <strong>{title}</strong>
+                <span>{subtitle}</span>
+                <code>{idText}</code>
+              </div>
+              <div className="identity-audit-variant-stats">
+                {listens != null ? <span>{listens} listens</span> : null}
+                {confidence != null ? <span>{Math.round(confidence * 100)}% confidence</span> : null}
+                {typeof item.source_track_count === "number" ? <span>{item.source_track_count} sources</span> : null}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  function renderIdentityAuditExample(example: TrackIdentityAuditExample, index: number) {
+    const exampleType = auditString(example.example_type, "identity");
+    const isCanonical = exampleType === "same_name_canonical_split";
+    const isRelease = exampleType === "release_track_source_split";
+    const isComposition = exampleType === "analysis_track_group";
+    const title = identityAuditTitle(example);
+    const meta = identityAuditMeta(example);
+    const variantItems = isCanonical
+      ? auditList(example.variants)
+      : isRelease
+        ? auditList(example.source_tracks)
+        : auditList(example.release_tracks);
+    const variantKind = isCanonical ? "canonical" : isRelease ? "release" : "composition";
+
+    return (
+      <article className="identity-audit-example" key={`${exampleType}-${title}-${index}`}>
+        <div className="identity-audit-example-header">
+          <div>
+            <h4>{title}</h4>
+            {meta ? <p>{meta}</p> : null}
+          </div>
+          <span className="identity-audit-type-badge">
+            {isCanonical ? "Canonical" : isRelease ? "Release" : "Composition"}
+          </span>
+        </div>
+        <div className="identity-audit-stats">
+          {renderAuditStat("Spotify IDs", example.spotify_track_id_count)}
+          {renderAuditStat("Sources", example.source_track_count)}
+          {renderAuditStat("Release tracks", example.release_track_count)}
+          {renderAuditStat("Folded listens", example.folded_listen_count)}
+          {renderAuditStat("First listened", example.first_listened_at)}
+          {renderAuditStat("Last listened", example.last_listened_at)}
+        </div>
+        {typeof example.grouping_note === "string" ? (
+          <p className="identity-audit-note">{example.grouping_note}</p>
+        ) : null}
+        {renderAuditVariantList(variantItems, variantKind)}
+      </article>
+    );
+  }
+
+  function renderIdentityAuditGroup(title: string, examples: TrackIdentityAuditExample[]) {
+    return (
+      <div className="identity-audit-group">
+        <div className="tracks-formula-heading">
+          <h3>{title}</h3>
+          <span>{examples.length} examples</span>
+        </div>
+        {examples.length === 0 ? (
+          <p className="empty-copy">No examples returned for this group.</p>
+        ) : (
+          <div className="identity-audit-examples">
+            {examples.map((example, index) => renderIdentityAuditExample(example, index))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function updateLocalReviewDecision(
+    entryId: string,
+    patch: Partial<LocalReviewDecision>,
+  ) {
+    setIdentityAuditLocalDecisions((current) => {
+      const existing = current[entryId] ?? {
+        verdict: "unsure" as LocalReviewVerdict,
+        grouping_target: null,
+        note: "",
+        updated_at_ms: Date.now(),
+      };
+      return {
+        ...current,
+        [entryId]: {
+          ...existing,
+          ...patch,
+          updated_at_ms: Date.now(),
+        },
+      };
+    });
+  }
+
+  function renderIdentityAuditOverviewTab() {
+    const canonicalCount = identityAudit?.same_name_canonical_splits.length ?? 0;
+    const releaseCount = identityAudit?.release_track_source_splits.length ?? 0;
+    const compositionCount = identityAudit?.analysis_track_groups.length ?? 0;
+    const suggestedCount = identityAuditSuggestedGroups?.summary.total_groups ?? 0;
+    const ambiguousCount = identityAuditAmbiguous?.summary.total_review_entries ?? 0;
+    return (
+      <div className="identity-audit-overview-grid">
+        <article className="identity-audit-overview-card">
+          <h3>Canonical Splits</h3>
+          <p>Same normalized title/artist with multiple Spotify IDs.</p>
+          <strong>{canonicalCount}</strong>
+        </article>
+        <article className="identity-audit-overview-card">
+          <h3>Release Track Splits</h3>
+          <p>Multiple source tracks folded under a single release track.</p>
+          <strong>{releaseCount}</strong>
+        </article>
+        <article className="identity-audit-overview-card">
+          <h3>Composition Groups</h3>
+          <p>Release tracks grouped at composition level for analysis.</p>
+          <strong>{compositionCount}</strong>
+        </article>
+        <article className="identity-audit-overview-card">
+          <h3>Suggested Groups</h3>
+          <p>Suggested composition links from conservative title/artist matching.</p>
+          <strong>{suggestedCount}</strong>
+        </article>
+        <article className="identity-audit-overview-card">
+          <h3>Ambiguous Queue</h3>
+          <p>Items requiring human judgment across variant-rule families.</p>
+          <strong>{ambiguousCount}</strong>
+        </article>
+      </div>
+    );
+  }
+
+  function renderIdentityAuditCanonicalTab() {
+    if (identityAuditError) {
+      return <p className="empty-copy">{identityAuditError}</p>;
+    }
+    if (!identityAudit) {
+      return <p className="empty-copy">{identityAuditLoading ? "Loading canonical splits..." : "Canonical splits are not loaded yet."}</p>;
+    }
+    return (
+      <div className="identity-audit-grid">
+        <p className="identity-audit-tab-copy">Canonical checks show where same-name entities still split across Spotify track IDs.</p>
+        {renderIdentityAuditGroup("Canonical Splits", identityAudit.same_name_canonical_splits)}
+      </div>
+    );
+  }
+
+  function releaseAlbumMergePreviewKey(prefix: string, releaseAlbums: Array<{ release_album_id: number }>) {
+    return `${prefix}:${releaseAlbums.map((item) => item.release_album_id).sort((a, b) => a - b).join(",")}`;
+  }
+
+  async function loadReleaseAlbumMergePreview(key: string, releaseAlbumIds: number[]) {
+    if (releaseAlbumMergePreviewLoadingKey) {
+      return;
+    }
+    setReleaseAlbumMergePreviewLoadingKey(key);
+    setReleaseAlbumMergePreviewErrorByKey((current) => ({ ...current, [key]: "" }));
+    try {
+      const preview = await postReleaseAlbumMergePreview(releaseAlbumIds);
+      setReleaseAlbumMergePreviewByKey((current) => ({ ...current, [key]: preview }));
+    } catch (error) {
+      setReleaseAlbumMergePreviewErrorByKey((current) => ({
+        ...current,
+        [key]: formatUiErrorMessage(error, "Failed to preview release album merge."),
+      }));
+    } finally {
+      setReleaseAlbumMergePreviewLoadingKey(null);
+    }
+  }
+
+  async function loadReleaseAlbumMergeDryRun(key: string, releaseAlbumIds: number[], survivorReleaseAlbumId: number) {
+    if (releaseAlbumMergeDryRunLoadingKey) {
+      return;
+    }
+    setReleaseAlbumMergeDryRunLoadingKey(key);
+    setReleaseAlbumMergeDryRunErrorByKey((current) => ({ ...current, [key]: "" }));
+    try {
+      const dryRun = await postReleaseAlbumMergeDryRun(releaseAlbumIds, survivorReleaseAlbumId);
+      setReleaseAlbumMergeDryRunByKey((current) => ({ ...current, [key]: dryRun }));
+    } catch (error) {
+      setReleaseAlbumMergeDryRunErrorByKey((current) => ({
+        ...current,
+        [key]: formatUiErrorMessage(error, "Failed to dry run release album merge."),
+      }));
+    } finally {
+      setReleaseAlbumMergeDryRunLoadingKey(null);
+    }
+  }
+
+  function renderReleaseAlbumMergeDryRun(key: string) {
+    const dryRun = releaseAlbumMergeDryRunByKey[key];
+    const error = releaseAlbumMergeDryRunErrorByKey[key];
+    if (error) {
+      return <p className="empty-copy">{error}</p>;
+    }
+    if (!dryRun) {
+      return null;
+    }
+    return (
+      <div style={{ marginTop: "12px" }}>
+        <div className="tracks-formula-heading">
+          <h3>Dry Run Plan</h3>
+          <span>{dryRun.blocked ? "blocked" : "ready"}</span>
+        </div>
+        {dryRun.blocked_reasons.map((reason) => (
+          <p className="empty-copy" key={`release-album-dry-run-blocked-${key}-${reason}`}>{reason}</p>
+        ))}
+        <p className="empty-copy">
+          Rows: source maps {dryRun.rows_affected.source_album_map ?? 0}, artist inserts {dryRun.rows_affected.album_artist_insert ?? 0}, artist deletes {dryRun.rows_affected.album_artist_delete ?? 0}, track repoints {dryRun.rows_affected.album_track_repoint ?? 0}, track conflicts {dryRun.rows_affected.album_track_conflict_delete ?? 0}, retired albums {dryRun.rows_affected.release_album_retire ?? 0}
+        </p>
+        {dryRun.statements.map((statement) => (
+          <p className="empty-copy" key={`release-album-dry-run-statement-${key}-${statement}`}>{statement}</p>
+        ))}
+        {Object.entries(dryRun.plan).map(([planKey, rows]) => (
+          rows.length > 0 ? (
+            <details key={`release-album-dry-run-plan-${key}-${planKey}`} open={planKey === "album_track_conflicts"}>
+              <summary>{planKey.replace(/_/g, " ")} ({rows.length})</summary>
+              <pre style={{ whiteSpace: "pre-wrap", overflowX: "auto" }}>{JSON.stringify(rows, null, 2)}</pre>
+            </details>
+          ) : null
+        ))}
+      </div>
+    );
+  }
+
+  function renderReleaseAlbumMergePreview(key: string) {
+    const preview = releaseAlbumMergePreviewByKey[key];
+    const error = releaseAlbumMergePreviewErrorByKey[key];
+    if (error) {
+      return <p className="empty-copy">{error}</p>;
+    }
+    if (!preview) {
+      return null;
+    }
+    const readinessLabel = preview.merge_readiness.replace(/_/g, " ");
+    return (
+      <div className="identity-audit-group" style={{ marginTop: "12px" }}>
+        <div className="tracks-formula-heading">
+          <h3>Merge Preview</h3>
+          <span>{readinessLabel} · Survivor {preview.survivor_release_album_id ?? "None"}</span>
+        </div>
+        {preview.readiness_reasons.length > 0 ? (
+          <div>
+            {preview.readiness_reasons.map((reason) => (
+              <p className="empty-copy" key={`release-album-merge-readiness-${key}-${reason}`}>{reason}</p>
+            ))}
+          </div>
+        ) : null}
+        {preview.warnings.length > 0 ? (
+          <div>
+            {preview.warnings.map((warning) => (
+              <p className="empty-copy" key={`release-album-merge-warning-${key}-${warning}`}>{warning}</p>
+            ))}
+          </div>
+        ) : null}
+        <p className="empty-copy">
+          Affected rows: source album maps {preview.affected.source_album_map_rows}, album artists {preview.affected.album_artist_rows}, release tracks {preview.affected.release_track_rows}, album tracks {preview.affected.album_track_rows}, album-track conflicts {preview.affected.album_track_conflicts}, raw listens {preview.affected.raw_play_event_rows}
+        </p>
+        <ul>
+          {preview.proposed_operations.map((operation) => (
+            <li key={`release-album-merge-operation-${key}-${operation}`}>{operation}</li>
+          ))}
+        </ul>
+        {preview.survivor_release_album_id !== null ? (() => {
+          const survivorReleaseAlbumId = preview.survivor_release_album_id;
+          return (
+            <button
+              className="track-ranking-chip"
+              type="button"
+              disabled={releaseAlbumMergeDryRunLoadingKey !== null}
+              onClick={() => void loadReleaseAlbumMergeDryRun(
+                key,
+                [survivorReleaseAlbumId, ...preview.merge_release_album_ids],
+                survivorReleaseAlbumId,
+              )}
+            >
+              {releaseAlbumMergeDryRunLoadingKey === key ? "Loading..." : "Dry run"}
+            </button>
+          );
+        })() : null}
+        {renderReleaseAlbumMergeDryRun(key)}
+      </div>
+    );
+  }
+
+  function renderIdentityAuditReleaseTab() {
+    const releaseTrackSplits = identityAudit?.release_track_source_splits ?? [];
+    return (
+      <div className="identity-audit-grid">
+        <p className="identity-audit-tab-copy">
+          Release review highlights candidates that likely belong to one release identity but are split today.
+        </p>
+        <div className="identity-audit-group">
+          <div className="tracks-formula-heading">
+            <h3>Duplicate Albums (Same Spotify Album ID)</h3>
+            <span>{albumDuplicateLookupResult?.total ?? 0} groups</span>
+          </div>
+          {albumDuplicateLookupError ? <p className="empty-copy">{albumDuplicateLookupError}</p> : null}
+          {!albumDuplicateLookupResult && albumDuplicateLookupLoading ? (
+            <p className="empty-copy">Loading duplicate album groups...</p>
+          ) : null}
+          {!albumDuplicateLookupLoading && (!albumDuplicateLookupResult || albumDuplicateLookupResult.items.length === 0) ? (
+            <p className="empty-copy">No duplicate albums found.</p>
+          ) : null}
+          {albumDuplicateLookupResult && albumDuplicateLookupResult.items.length > 0 ? (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Spotify Album</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Spotify Name</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Release Album</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Artist</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Dup Count</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Preview</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {albumDuplicateLookupResult.items.map((group) => {
+                    const previewKey = releaseAlbumMergePreviewKey(`spotify:${group.spotify_album_id}`, group.release_albums);
+                    const releaseAlbumIds = group.release_albums.map((item) => item.release_album_id);
+                    return (
+                      <Fragment key={`identity-release-dup-album-group-${group.spotify_album_id}`}>
+                        {group.release_albums.map((item, index) => (
+                          <tr key={`identity-release-dup-album-${group.spotify_album_id}-${item.release_album_id}`}>
+                            <td style={{ padding: "8px", verticalAlign: "top", wordBreak: "break-word" }}>{index === 0 ? group.spotify_album_id : ""}</td>
+                            <td style={{ padding: "8px", verticalAlign: "top" }}>{index === 0 ? (group.spotify_album_name ?? "Unknown") : ""}</td>
+                            <td style={{ padding: "8px", verticalAlign: "top", fontWeight: 600 }}>{item.release_album_name}</td>
+                            <td style={{ padding: "8px", verticalAlign: "top" }}>{item.artist_name}</td>
+                            <td style={{ padding: "8px", verticalAlign: "top", whiteSpace: "nowrap" }}>{index === 0 ? group.duplicate_count : ""}</td>
+                            <td style={{ padding: "8px", verticalAlign: "top" }}>
+                              {index === 0 ? (
+                                <button
+                                  className="track-ranking-chip"
+                                  type="button"
+                                  disabled={releaseAlbumMergePreviewLoadingKey !== null}
+                                  onClick={() => void loadReleaseAlbumMergePreview(previewKey, releaseAlbumIds)}
+                                >
+                                  {releaseAlbumMergePreviewLoadingKey === previewKey ? "Loading..." : "Preview merge"}
+                                </button>
+                              ) : null}
+                            </td>
+                          </tr>
+                        ))}
+                        {releaseAlbumMergePreviewByKey[previewKey] || releaseAlbumMergePreviewErrorByKey[previewKey] ? (
+                          <tr>
+                            <td colSpan={6} style={{ padding: "8px" }}>{renderReleaseAlbumMergePreview(previewKey)}</td>
+                          </tr>
+                        ) : null}
+                      </Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+        </div>
+        <div className="identity-audit-group">
+          <div className="tracks-formula-heading">
+            <h3>Duplicate Albums (Same Name + Primary Artist)</h3>
+            <span>{albumNameDuplicateLookupResult?.total ?? 0} groups</span>
+          </div>
+          {albumNameDuplicateLookupError ? <p className="empty-copy">{albumNameDuplicateLookupError}</p> : null}
+          {!albumNameDuplicateLookupResult && albumNameDuplicateLookupLoading ? (
+            <p className="empty-copy">Loading duplicate album name groups...</p>
+          ) : null}
+          {!albumNameDuplicateLookupLoading && (!albumNameDuplicateLookupResult || albumNameDuplicateLookupResult.items.length === 0) ? (
+            <p className="empty-copy">No duplicate album name groups found.</p>
+          ) : null}
+          {albumNameDuplicateLookupResult && albumNameDuplicateLookupResult.items.length > 0 ? (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Normalized Album</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Normalized Primary Artist</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Spotify Album IDs</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Release Album</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Artist</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Spotify Album</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Tracklist</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Catalog</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Queue</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Dup Count</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Preview</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {albumNameDuplicateLookupResult.items.map((group) => {
+                    const previewKey = releaseAlbumMergePreviewKey(`name:${group.normalized_album_name}:${group.normalized_primary_artist}`, group.release_albums);
+                    const releaseAlbumIds = group.release_albums.map((item) => item.release_album_id);
+                    return (
+                      <Fragment key={`identity-release-dup-name-album-group-${group.normalized_album_name}-${group.normalized_primary_artist}`}>
+                        {group.release_albums.map((item, index) => (
+                          <tr key={`identity-release-dup-name-album-${group.normalized_album_name}-${group.normalized_primary_artist}-${item.release_album_id}`}>
+                            <td style={{ padding: "8px", verticalAlign: "top" }}>{index === 0 ? group.normalized_album_name : ""}</td>
+                            <td style={{ padding: "8px", verticalAlign: "top" }}>{index === 0 ? group.normalized_primary_artist : ""}</td>
+                            <td style={{ padding: "8px", verticalAlign: "top", wordBreak: "break-word" }}>{index === 0 ? (group.spotify_album_ids.length > 0 ? group.spotify_album_ids.join(", ") : "None") : ""}</td>
+                            <td style={{ padding: "8px", verticalAlign: "top", fontWeight: 600 }}>{item.release_album_name}</td>
+                            <td style={{ padding: "8px", verticalAlign: "top" }}>{item.artist_name}</td>
+                            <td style={{ padding: "8px", verticalAlign: "top", wordBreak: "break-word" }}>{item.spotify_album_id ?? "None"}{item.spotify_album_name ? ` (${item.spotify_album_name})` : ""}</td>
+                            <td style={{ padding: "8px", verticalAlign: "top", whiteSpace: "nowrap" }}>{item.album_track_rows} / {item.total_tracks ?? "?"}</td>
+                            <td style={{ padding: "8px", verticalAlign: "top" }}>{item.catalog_status ?? "unknown"}</td>
+                            <td style={{ padding: "8px", verticalAlign: "top" }}>{item.queue_status}</td>
+                            <td style={{ padding: "8px", verticalAlign: "top", whiteSpace: "nowrap" }}>{index === 0 ? group.duplicate_count : ""}</td>
+                            <td style={{ padding: "8px", verticalAlign: "top" }}>
+                              {index === 0 ? (
+                                <button
+                                  className="track-ranking-chip"
+                                  type="button"
+                                  disabled={releaseAlbumMergePreviewLoadingKey !== null}
+                                  onClick={() => void loadReleaseAlbumMergePreview(previewKey, releaseAlbumIds)}
+                                >
+                                  {releaseAlbumMergePreviewLoadingKey === previewKey ? "Loading..." : "Preview merge"}
+                                </button>
+                              ) : null}
+                            </td>
+                          </tr>
+                        ))}
+                        {releaseAlbumMergePreviewByKey[previewKey] || releaseAlbumMergePreviewErrorByKey[previewKey] ? (
+                          <tr>
+                            <td colSpan={11} style={{ padding: "8px" }}>{renderReleaseAlbumMergePreview(previewKey)}</td>
+                          </tr>
+                        ) : null}
+                      </Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+        </div>
+        <div className="identity-audit-group">
+          <div className="tracks-formula-heading">
+            <h3>Duplicate Tracks (Same Spotify Track ID)</h3>
+            <span>{trackDuplicateLookupResult?.total ?? 0} groups</span>
+          </div>
+          {trackDuplicateLookupError ? <p className="empty-copy">{trackDuplicateLookupError}</p> : null}
+          {!trackDuplicateLookupResult && trackDuplicateLookupLoading ? (
+            <p className="empty-copy">Loading duplicate track groups...</p>
+          ) : null}
+          {!trackDuplicateLookupLoading && (!trackDuplicateLookupResult || trackDuplicateLookupResult.items.length === 0) ? (
+            <p className="empty-copy">No duplicate tracks found.</p>
+          ) : null}
+          {trackDuplicateLookupResult && trackDuplicateLookupResult.items.length > 0 ? (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Spotify Track</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Spotify Name</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Duration</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Release Track</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Artist</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Release Album</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Spotify Album</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Catalog</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Queue</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Dup Count</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {trackDuplicateLookupResult.items.map((group) =>
+                    group.release_tracks.map((item, index) => (
+                      <tr key={`identity-release-dup-track-${group.spotify_track_id}-${item.release_track_id}`}>
+                        <td style={{ padding: "8px", verticalAlign: "top", wordBreak: "break-word" }}>{index === 0 ? group.spotify_track_id : ""}</td>
+                        <td style={{ padding: "8px", verticalAlign: "top" }}>{index === 0 ? (group.spotify_track_name ?? "Unknown") : ""}</td>
+                        <td style={{ padding: "8px", verticalAlign: "top", whiteSpace: "nowrap" }}>{index === 0 ? (group.duration_display ?? "Unknown") : ""}</td>
+                        <td style={{ padding: "8px", verticalAlign: "top", fontWeight: 600 }}>{item.release_track_name}</td>
+                        <td style={{ padding: "8px", verticalAlign: "top" }}>{item.artist_name}</td>
+                        <td style={{ padding: "8px", verticalAlign: "top" }}>{item.release_album_name}</td>
+                        <td style={{ padding: "8px", verticalAlign: "top", wordBreak: "break-word" }}>{item.spotify_album_id ?? "Unknown"}</td>
+                        <td style={{ padding: "8px", verticalAlign: "top" }}>{item.catalog_status ?? "unknown"}</td>
+                        <td style={{ padding: "8px", verticalAlign: "top" }}>{item.queue_status}</td>
+                        <td style={{ padding: "8px", verticalAlign: "top", whiteSpace: "nowrap" }}>{index === 0 ? group.duplicate_count : ""}</td>
+                      </tr>
+                    )),
+                  )}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+        </div>
+        <div className="identity-audit-group">
+          <div className="tracks-formula-heading">
+            <h3>Release Track Split Signals</h3>
+            <span>{releaseTrackSplits.length} examples</span>
+          </div>
+          <p className="identity-audit-tab-copy">
+            These examples show source-track rows collapsing into one release track and can indicate additional release-level cleanup opportunities.
+          </p>
+          {identityAuditError ? <p className="empty-copy">{identityAuditError}</p> : null}
+          {!identityAudit && identityAuditLoading ? <p className="empty-copy">Loading release track splits...</p> : null}
+          {identityAudit && releaseTrackSplits.length > 0 ? renderIdentityAuditGroup("Release Track Splits", releaseTrackSplits) : null}
+          {identityAudit && releaseTrackSplits.length === 0 ? <p className="empty-copy">No release track split examples returned.</p> : null}
+        </div>
+      </div>
+    );
+  }
+
+  function renderIdentityAuditCompositionTab() {
+    if (identityAuditError) {
+      return <p className="empty-copy">{identityAuditError}</p>;
+    }
+    if (!identityAudit) {
+      return <p className="empty-copy">{identityAuditLoading ? "Loading composition examples..." : "Composition examples are not loaded yet."}</p>;
+    }
+    return (
+      <div className="identity-audit-grid">
+        <p className="identity-audit-tab-copy">
+          Composition checks show currently grouped release tracks.
+        </p>
+        {renderIdentityAuditGroup("Current Composition Groups", identityAudit.analysis_track_groups)}
+      </div>
+    );
+  }
+
+  function renderIdentityAuditAmbiguousTab() {
+    const familyOptions = identityAuditAmbiguous?.family_counts ?? [];
+    const suggestedItems = identityAuditSuggestedGroups?.items ?? [];
+    const filteredItems = computeAmbiguousTrackItems();
+    const unifiedItems = computeUnifiedReviewItems();
+    const visibleItems = filteredItems.slice(0, identityAuditAmbiguousVisibleCount);
+    const focusedItem = identityAuditFocusedReviewKey == null
+      ? null
+      : (unifiedItems.find((item) => item.decision_key === identityAuditFocusedReviewKey) ?? null);
+    const focusedDecision = focusedItem ? identityAuditLocalDecisions[focusedItem.decision_key] : undefined;
+    const reviewedAmbiguousCount = filteredItems.reduce((count, item) => (
+      isReviewedDecision(identityAuditLocalDecisions[trackDecisionKey(item)]) ? count + 1 : count
+    ), 0);
+    const reviewedSuggestedCount = suggestedItems.reduce((count, group) => {
+      const decision = identityAuditLocalDecisions[groupDecisionKey(group)];
+      return isReviewedDecision(decision) ? count + 1 : count;
+    }, 0);
+    const reviewedCount = reviewedAmbiguousCount + reviewedSuggestedCount;
+    const totalReviewableCount = filteredItems.length + suggestedItems.length;
+    const summaryByFamily = new Map<string, { total: number; approved: number; rejected: number; skipped: number; unreviewed: number }>();
+    for (const item of unifiedItems) {
+      const current = summaryByFamily.get(item.family_label) ?? { total: 0, approved: 0, rejected: 0, skipped: 0, unreviewed: 0 };
+      current.total += 1;
+      const verdict = identityAuditLocalDecisions[item.decision_key]?.verdict ?? "unsure";
+      if (verdict === "good_to_group") {
+        current.approved += 1;
+      } else if (verdict === "not_good") {
+        current.rejected += 1;
+      } else if (verdict === "skipped") {
+        current.skipped += 1;
+      } else {
+        current.unreviewed += 1;
+      }
+      summaryByFamily.set(item.family_label, current);
+    }
+    const summaryEntries = Array.from(summaryByFamily.entries())
+      .sort((left, right) => right[1].total - left[1].total || left[0].localeCompare(right[0]));
+    const visibleSummaryEntries = summaryEntries.slice(0, 8);
+    const remainingSummaryCount = Math.max(0, summaryEntries.length - visibleSummaryEntries.length);
+
+    const groupApproved: Array<Record<string, unknown>> = [];
+    const groupRejected: Array<Record<string, unknown>> = [];
+    const groupSkipped: Array<Record<string, unknown>> = [];
+    const trackApproved: Array<Record<string, unknown>> = [];
+    const trackRejected: Array<Record<string, unknown>> = [];
+    const trackSkipped: Array<Record<string, unknown>> = [];
+
+    for (const item of unifiedItems) {
+      const decision = identityAuditLocalDecisions[item.decision_key];
+      if (!decision || decision.verdict === "unsure") {
+        continue;
+      }
+      if (item.item_type === "group") {
+        const group = item.group;
+        const label = group?.analysis_track_name || (group?.analysis_track_id != null ? `analysis_track ${group.analysis_track_id}` : item.decision_key);
+        const entry = {
+          decision_key: item.decision_key,
+          id: group?.analysis_track_id ?? item.decision_key,
+          decision: decision.verdict,
+          label,
+          family: group?.song_family_key ?? item.family_label,
+          bucket: item.bucket_label,
+          would: decision.verdict === "good_to_group"
+            ? `Would group as composition family: ${label}`
+            : decision.verdict === "not_good"
+              ? `Would keep suggested group separate: ${label}`
+              : `Would defer suggested group: ${label}`,
+          source: group
+            ? {
+                analysis_track_id: group.analysis_track_id,
+                analysis_track_name: group.analysis_track_name,
+                song_family_key: group.song_family_key,
+                release_track_count: group.release_track_count,
+                confidence: group.confidence,
+                match_method: group.match_method,
+              }
+            : null,
+        };
+        if (decision.verdict === "good_to_group") {
+          groupApproved.push(entry);
+        } else if (decision.verdict === "not_good") {
+          groupRejected.push(entry);
+        } else {
+          groupSkipped.push(entry);
+        }
+      } else {
+        const track = item.track;
+        const label = track?.release_track_name || (track?.release_track_id != null ? `release_track ${track.release_track_id}` : item.decision_key);
+        const entry = {
+          decision_key: item.decision_key,
+          id: track?.release_track_id ?? item.decision_key,
+          decision: decision.verdict,
+          label,
+          family: track?.dominant_family ?? item.family_label,
+          bucket: track?.bucket ?? item.bucket_label,
+          would: decision.verdict === "good_to_group"
+            ? `Would accept track identity mapping: ${label}`
+            : decision.verdict === "not_good"
+              ? `Would reject track identity mapping: ${label}`
+              : `Would defer track decision: ${label}`,
+          source: track
+            ? {
+                release_track_id: track.release_track_id,
+                release_track_name: track.release_track_name,
+                artist_name: track.artist_name,
+                analysis_name: track.analysis_name,
+                bucket: track.bucket,
+                dominant_family: track.dominant_family,
+                review_families: track.review_families,
+                confidence: track.confidence,
+              }
+            : null,
+        };
+        if (decision.verdict === "good_to_group") {
+          trackApproved.push(entry);
+        } else if (decision.verdict === "not_good") {
+          trackRejected.push(entry);
+        } else {
+          trackSkipped.push(entry);
+        }
+      }
+    }
+
+    const totalLocalDecisions = (
+      groupApproved.length
+      + groupRejected.length
+      + groupSkipped.length
+      + trackApproved.length
+      + trackRejected.length
+      + trackSkipped.length
+    );
+    const previewPayload = {
+      generated_at: new Date().toISOString(),
+      summary: {
+        total_local_decisions: totalLocalDecisions,
+        groups: {
+          approved: groupApproved.length,
+          rejected: groupRejected.length,
+          skipped: groupSkipped.length,
+        },
+        tracks: {
+          approved: trackApproved.length,
+          rejected: trackRejected.length,
+          skipped: trackSkipped.length,
+        },
+      },
+      decisions: {
+        groups: {
+          approved: groupApproved,
+          rejected: groupRejected,
+          skipped: groupSkipped,
+        },
+        tracks: {
+          approved: trackApproved,
+          rejected: trackRejected,
+          skipped: trackSkipped,
+        },
+      },
+    };
+    const previewJson = JSON.stringify(previewPayload, null, 2);
+    const canSaveSubmission = Boolean(
+      totalLocalDecisions > 0
+      && identityAuditPreviewValidationResult
+      && !identityAuditPreviewValidationLoading,
+    );
+
+    const copyPreviewJson = async () => {
+      if (!("clipboard" in navigator) || typeof navigator.clipboard?.writeText !== "function") {
+        setIdentityAuditPreviewCopyStatus("Clipboard unavailable");
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(previewJson);
+        setIdentityAuditPreviewCopyStatus("Copied JSON");
+      } catch {
+        setIdentityAuditPreviewCopyStatus("Copy failed");
+      }
+    };
+
+    const downloadPreviewJson = () => {
+      try {
+        const blob = new Blob([previewJson], { type: "application/json;charset=utf-8" });
+        const objectUrl = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = objectUrl;
+        link.download = "identity-audit-submission-preview.json";
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(objectUrl);
+      } catch {
+        // Keep silent; this is a convenience path only.
+      }
+    };
+
+    const validatePreviewJson = async () => {
+      if (identityAuditPreviewValidationLoading) {
+        return;
+      }
+      setIdentityAuditPreviewValidationLoading(true);
+      setIdentityAuditPreviewValidationError("");
+      try {
+        const response = await fetch(
+          `${apiBaseUrl}/debug/tracks/identity-audit/submission-preview/validate`,
+          {
+            method: "POST",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: previewJson,
+          },
+        );
+        if (!response.ok) {
+          let detail = "Failed to validate submission preview.";
+          try {
+            const payload = (await response.json()) as { detail?: string };
+            if (payload.detail) {
+              detail = payload.detail;
+            }
+          } catch {
+            // keep fallback
+          }
+          throw new Error(detail);
+        }
+        const payload = (await response.json()) as SubmissionPreviewValidationResponse;
+        setIdentityAuditPreviewValidationResult(payload);
+        setIdentityAuditPreviewValidatedAt(Date.now());
+      } catch (error) {
+        setIdentityAuditPreviewValidationError(formatUiErrorMessage(error, "Failed to validate preview."));
+        setIdentityAuditPreviewValidationResult(null);
+        setIdentityAuditPreviewValidatedAt(null);
+      } finally {
+        setIdentityAuditPreviewValidationLoading(false);
+      }
+    };
+
+    const saveSubmissionPreview = async () => {
+      if (identityAuditSubmissionSaveLoading || !canSaveSubmission) {
+        return;
+      }
+      setIdentityAuditSubmissionSaveLoading(true);
+      setIdentityAuditSubmissionSaveError("");
+      setIdentityAuditSubmissionSaveResult(null);
+      try {
+        const response = await fetch(
+          `${apiBaseUrl}/debug/tracks/identity-audit/submissions`,
+          {
+            method: "POST",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: previewJson,
+          },
+        );
+        if (!response.ok) {
+          let detail = "Failed to save submission.";
+          try {
+            const payload = (await response.json()) as { detail?: string };
+            if (payload.detail) {
+              detail = payload.detail;
+            }
+          } catch {
+            // keep fallback
+          }
+          throw new Error(detail);
+        }
+        const payload = (await response.json()) as IdentityAuditSubmissionSaveResponse;
+        setIdentityAuditSubmissionSaveResult(payload);
+        void loadIdentityAuditSavedSubmissions(true);
+      } catch (error) {
+        setIdentityAuditSubmissionSaveError(formatUiErrorMessage(error, "Failed to save submission."));
+      } finally {
+        setIdentityAuditSubmissionSaveLoading(false);
+      }
+    };
+
+    const renderPreviewBucket = (title: string, entries: Array<Record<string, unknown>>) => (
+      <div className="identity-audit-group" key={`preview-${title}`}>
+        <div className="tracks-formula-heading">
+          <h3>{title}</h3>
+          <span>{entries.length}</span>
+        </div>
+        {entries.length === 0 ? (
+          <p className="empty-copy">None</p>
+        ) : (
+          <div className="identity-audit-variant-list">
+            {entries.map((entry, index) => (
+              <div className="identity-audit-variant" key={`preview-entry-${title}-${String(entry.decision_key)}-${index}`}>
+                <div className="identity-audit-variant-main">
+                  <strong>{String(entry.label ?? entry.id ?? "Unknown item")}</strong>
+                  <span>{String(entry.would ?? "")}</span>
+                  <code>{String(entry.decision_key ?? "")}</code>
+                </div>
+                <div className="identity-audit-variant-stats">
+                  {entry.family ? <span>{String(entry.family)}</span> : null}
+                  {entry.bucket ? <span>{String(entry.bucket)}</span> : null}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+
+    const applyFocusedAction = (verdict: LocalReviewVerdict) => {
+      if (!focusedItem) {
+        return;
+      }
+      const nextDecisions = {
+        ...identityAuditLocalDecisions,
+        [focusedItem.decision_key]: {
+          verdict,
+          grouping_target: verdict === "good_to_group"
+            ? (identityAuditLocalDecisions[focusedItem.decision_key]?.grouping_target ?? "same_composition")
+            : null,
+          note: identityAuditLocalDecisions[focusedItem.decision_key]?.note ?? "",
+          updated_at_ms: Date.now(),
+        },
+      };
+      updateLocalReviewDecision(focusedItem.decision_key, {
+        verdict,
+        grouping_target: verdict === "good_to_group"
+          ? (identityAuditLocalDecisions[focusedItem.decision_key]?.grouping_target ?? "same_composition")
+          : null,
+      });
+      setIdentityAuditFocusedReviewKey(findNextUnreviewedDecisionKey(unifiedItems, focusedItem.decision_key, nextDecisions));
+    };
+
+    return (
+      <div className="identity-audit-grid">
+        <div className="identity-audit-ambiguous-toolbar">
+          <p className="identity-audit-tab-copy">
+            Review ambiguous rows and suggested composition groups in one local-only queue.
+          </p>
+          <div className="identity-audit-ambiguous-summary">
+            <span className="identity-audit-pill">Local only (not saved)</span>
+            <span className="identity-audit-pill">Reviewed {reviewedCount} / {totalReviewableCount}</span>
+            <span className="identity-audit-pill">Shortcuts: A approve, R reject, S skip, N next</span>
+            <button
+              className="secondary-button"
+              onClick={() => {
+                setIdentityAuditLocalDecisions({});
+                setIdentityAuditPreviewCopyStatus("");
+                setIdentityAuditPreviewValidationLoading(false);
+                setIdentityAuditPreviewValidationError("");
+                setIdentityAuditPreviewValidationResult(null);
+                setIdentityAuditPreviewValidatedAt(null);
+                setIdentityAuditSubmissionSaveLoading(false);
+                setIdentityAuditSubmissionSaveError("");
+                setIdentityAuditSubmissionSaveResult(null);
+              }}
+              type="button"
+            >
+              Reset local decisions
+            </button>
+          </div>
+        </div>
+        <div className="identity-audit-ambiguous-filters">
+          <label>
+            Family
+            <select
+              onChange={(event) => setIdentityAuditAmbiguousFamilyFilter(event.target.value)}
+              value={identityAuditAmbiguousFamilyFilter}
+            >
+              <option value="all">All families</option>
+              {familyOptions.map((family) => (
+                <option key={`family-${family.family}`} value={family.family}>{family.family} ({family.count})</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Bucket
+            <select
+              onChange={(event) => setIdentityAuditAmbiguousBucketFilter(event.target.value as "all" | "grouped" | "ungrouped")}
+              value={identityAuditAmbiguousBucketFilter}
+            >
+              <option value="all">All</option>
+              <option value="grouped">Grouped</option>
+              <option value="ungrouped">Ungrouped</option>
+            </select>
+          </label>
+        </div>
+        <div className="identity-audit-group">
+          <div className="tracks-formula-heading">
+            <h3>Progress Summary</h3>
+            <span>{summaryEntries.length} buckets</span>
+          </div>
+          {visibleSummaryEntries.length > 0 ? (
+            <div className="identity-audit-stats">
+              {visibleSummaryEntries.map(([label, counts]) => (
+                <span className="identity-audit-stat" key={`summary-${label}`}>
+                  <span>{label}</span>
+                  <strong>
+                    {counts.total} total | {counts.approved} approved | {counts.rejected} rejected | {counts.skipped} skipped | {counts.unreviewed} unreviewed
+                  </strong>
+                </span>
+              ))}
+              {remainingSummaryCount > 0 ? (
+                <span className="identity-audit-stat"><span>More buckets</span><strong>+{remainingSummaryCount} more</strong></span>
+              ) : null}
+            </div>
+          ) : (
+            <p className="empty-copy">No review buckets available yet.</p>
+          )}
+        </div>
+        <div className="identity-audit-group">
+          <div className="tracks-formula-heading">
+            <h3>Next Unreviewed</h3>
+            <span>{findNextUnreviewedDecisionKey(unifiedItems) ? "Ready" : "Complete"}</span>
+          </div>
+          {focusedItem ? (
+            <article className="identity-audit-example">
+              <div className="identity-audit-example-header">
+                <div>
+                  <h4>{focusedItem.title}</h4>
+                  <p>{focusedItem.subtitle}</p>
+                </div>
+                <span className="identity-audit-type-badge">{focusedItem.item_type === "group" ? "Suggested group" : "Ambiguous track"}</span>
+              </div>
+              <div className="identity-audit-stats">
+                <span className="identity-audit-stat"><span>Bucket</span><strong>{focusedItem.bucket_label}</strong></span>
+                <span className="identity-audit-stat"><span>Family</span><strong>{focusedItem.family_label}</strong></span>
+                <span className="identity-audit-stat"><span>Current</span><strong>{focusedDecision?.verdict ?? "unreviewed"}</strong></span>
+              </div>
+              <div className="identity-audit-ambiguous-summary">
+                <button className="secondary-button" onClick={() => applyFocusedAction("good_to_group")} type="button">Approve</button>
+                <button className="secondary-button" onClick={() => applyFocusedAction("not_good")} type="button">Reject</button>
+                <button className="secondary-button" onClick={() => applyFocusedAction("skipped")} type="button">Skip</button>
+                <button
+                  className="secondary-button"
+                  onClick={() => setIdentityAuditFocusedReviewKey(findNextUnreviewedDecisionKey(unifiedItems, focusedItem.decision_key))}
+                  type="button"
+                >
+                  Next unreviewed
+                </button>
+              </div>
+            </article>
+          ) : (
+            <p className="empty-copy">All items reviewed locally.</p>
+          )}
+        </div>
+        <div className="identity-audit-group">
+          <div className="tracks-formula-heading">
+            <h3>Submission Preview (Local Only)</h3>
+            <span>{totalLocalDecisions} decisions</span>
+          </div>
+          <div className="identity-audit-ambiguous-summary">
+            <span className="identity-audit-pill">Groups: {groupApproved.length} approved, {groupRejected.length} rejected, {groupSkipped.length} skipped</span>
+            <span className="identity-audit-pill">Tracks: {trackApproved.length} approved, {trackRejected.length} rejected, {trackSkipped.length} skipped</span>
+            <button className="secondary-button" onClick={() => void copyPreviewJson()} type="button">Copy JSON</button>
+            <button className="secondary-button" onClick={downloadPreviewJson} type="button">Download JSON</button>
+            <button
+              className="secondary-button"
+              disabled={identityAuditPreviewValidationLoading}
+              onClick={() => void validatePreviewJson()}
+              type="button"
+            >
+              {identityAuditPreviewValidationLoading
+                ? "Validating..."
+                : identityAuditPreviewValidationResult
+                  ? "Revalidate Preview"
+                  : "Validate Preview"}
+            </button>
+            <button
+              className="secondary-button"
+              disabled={!canSaveSubmission || identityAuditSubmissionSaveLoading}
+              onClick={() => void saveSubmissionPreview()}
+              type="button"
+            >
+              {identityAuditSubmissionSaveLoading ? "Saving..." : "Save Submission"}
+            </button>
+            {identityAuditPreviewCopyStatus ? <span className="identity-audit-pill">{identityAuditPreviewCopyStatus}</span> : null}
+          </div>
+          <p className="empty-copy">Saved only. No changes applied.</p>
+          {identityAuditPreviewValidationResult
+            && (identityAuditPreviewValidationResult.summary.warnings > 0
+              || identityAuditPreviewValidationResult.summary.unknown_groups > 0
+              || identityAuditPreviewValidationResult.summary.unknown_tracks > 0) ? (
+            <p className="empty-copy">Validation has warnings; saved record will include them.</p>
+            ) : null}
+          {identityAuditPreviewValidationError ? <p className="empty-copy">{identityAuditPreviewValidationError}</p> : null}
+          {identityAuditSubmissionSaveError ? <p className="empty-copy">{identityAuditSubmissionSaveError}</p> : null}
+          {identityAuditSubmissionSaveResult ? (
+            <div className="identity-audit-group">
+              <div className="tracks-formula-heading">
+                <h3>Saved Submission</h3>
+                <span>#{identityAuditSubmissionSaveResult.submission_id}</span>
+              </div>
+              <p className="empty-copy">
+                Saved submission #{identityAuditSubmissionSaveResult.submission_id}
+                {" "}
+                ({identityAuditSubmissionSaveResult.status}) at {new Date(identityAuditSubmissionSaveResult.created_at).toLocaleString()}.
+              </p>
+              <div className="identity-audit-stats">
+                <span className="identity-audit-stat"><span>Warnings</span><strong>{identityAuditSubmissionSaveResult.warnings.length}</strong></span>
+                <span className="identity-audit-stat"><span>Unknown groups</span><strong>{identityAuditSubmissionSaveResult.unknown_items.groups.length}</strong></span>
+                <span className="identity-audit-stat"><span>Unknown tracks</span><strong>{identityAuditSubmissionSaveResult.unknown_items.tracks.length}</strong></span>
+              </div>
+            </div>
+          ) : null}
+          {identityAuditPreviewValidationResult ? (
+            <div className="identity-audit-group">
+              <div className="tracks-formula-heading">
+                <h3>Validation Result</h3>
+                <span>{identityAuditPreviewValidationResult.ok ? "ok" : "failed"}</span>
+              </div>
+              {identityAuditPreviewValidatedAt ? (
+                <p className="empty-copy">Validated at {new Date(identityAuditPreviewValidatedAt).toLocaleTimeString()}</p>
+              ) : null}
+              <div className="identity-audit-stats">
+                <span className="identity-audit-stat"><span>Total</span><strong>{identityAuditPreviewValidationResult.summary.total_decisions}</strong></span>
+                <span className="identity-audit-stat"><span>Groups</span><strong>{identityAuditPreviewValidationResult.summary.group_decisions}</strong></span>
+                <span className="identity-audit-stat"><span>Tracks</span><strong>{identityAuditPreviewValidationResult.summary.track_decisions}</strong></span>
+                <span className="identity-audit-stat"><span>Warnings</span><strong>{identityAuditPreviewValidationResult.summary.warnings}</strong></span>
+                <span className="identity-audit-stat"><span>Unknown groups</span><strong>{identityAuditPreviewValidationResult.summary.unknown_groups}</strong></span>
+                <span className="identity-audit-stat"><span>Unknown tracks</span><strong>{identityAuditPreviewValidationResult.summary.unknown_tracks}</strong></span>
+              </div>
+              {identityAuditPreviewValidationResult.summary.total_decisions === 0 ? (
+                <p className="empty-copy">No decisions to validate.</p>
+              ) : null}
+              {identityAuditPreviewValidationResult.warnings.length > 0 ? (
+                <div className="identity-audit-variant-list">
+                  {identityAuditPreviewValidationResult.warnings.map((warning, index) => (
+                    <div className="identity-audit-variant" key={`validation-warning-${index}`}>
+                      <div className="identity-audit-variant-main">
+                        <strong>Warning</strong>
+                        <span>{warning}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="empty-copy">No validation warnings.</p>
+              )}
+              <div className="identity-audit-group">
+                <div className="tracks-formula-heading">
+                  <h3>Unknown Groups</h3>
+                  <span>{identityAuditPreviewValidationResult.unknown_items.groups.length}</span>
+                </div>
+                {identityAuditPreviewValidationResult.unknown_items.groups.length > 0 ? (
+                  <div className="identity-audit-variant-list">
+                    {identityAuditPreviewValidationResult.unknown_items.groups.map((item, index) => (
+                      <div className="identity-audit-variant" key={`unknown-group-${index}`}>
+                        <div className="identity-audit-variant-main">
+                          <strong>{String(item.label ?? item.id ?? "Unknown group")}</strong>
+                          <code>{String(item.decision_key ?? "")}</code>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="empty-copy">None.</p>
+                )}
+              </div>
+              <div className="identity-audit-group">
+                <div className="tracks-formula-heading">
+                  <h3>Unknown Tracks</h3>
+                  <span>{identityAuditPreviewValidationResult.unknown_items.tracks.length}</span>
+                </div>
+                {identityAuditPreviewValidationResult.unknown_items.tracks.length > 0 ? (
+                  <div className="identity-audit-variant-list">
+                    {identityAuditPreviewValidationResult.unknown_items.tracks.map((item, index) => (
+                      <div className="identity-audit-variant" key={`unknown-track-${index}`}>
+                        <div className="identity-audit-variant-main">
+                          <strong>{String(item.label ?? item.id ?? "Unknown track")}</strong>
+                          <code>{String(item.decision_key ?? "")}</code>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="empty-copy">None.</p>
+                )}
+              </div>
+            </div>
+          ) : null}
+          {totalLocalDecisions === 0 ? (
+            <p className="empty-copy">No local decisions yet.</p>
+          ) : (
+            <div className="identity-audit-grid">
+              <div className="identity-audit-group">
+                <div className="tracks-formula-heading">
+                  <h3>Group Decisions</h3>
+                  <span>{groupApproved.length + groupRejected.length + groupSkipped.length}</span>
+                </div>
+                {renderPreviewBucket("Approved", groupApproved)}
+                {renderPreviewBucket("Rejected", groupRejected)}
+                {renderPreviewBucket("Skipped", groupSkipped)}
+              </div>
+              <div className="identity-audit-group">
+                <div className="tracks-formula-heading">
+                  <h3>Track Decisions</h3>
+                  <span>{trackApproved.length + trackRejected.length + trackSkipped.length}</span>
+                </div>
+                {renderPreviewBucket("Approved", trackApproved)}
+                {renderPreviewBucket("Rejected", trackRejected)}
+                {renderPreviewBucket("Skipped", trackSkipped)}
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="identity-audit-group">
+          <div className="tracks-formula-heading">
+            <h3>Saved Submissions</h3>
+            <span>{identityAuditSavedSubmissions?.total ?? 0}</span>
+          </div>
+          <div className="identity-audit-ambiguous-summary">
+            <button
+              className="secondary-button"
+              disabled={identityAuditSavedSubmissionsLoading}
+              onClick={() => void loadIdentityAuditSavedSubmissions(true)}
+              type="button"
+            >
+              {identityAuditSavedSubmissionsLoading ? "Refreshing..." : "Refresh saved submissions"}
+            </button>
+          </div>
+          {identityAuditSavedSubmissionsError ? <p className="empty-copy">{identityAuditSavedSubmissionsError}</p> : null}
+          {!identityAuditSavedSubmissions && !identityAuditSavedSubmissionsError ? (
+            <p className="empty-copy">{identityAuditSavedSubmissionsLoading ? "Loading saved submissions..." : "Saved submissions are not loaded yet."}</p>
+          ) : null}
+          {identityAuditSavedSubmissions && identityAuditSavedSubmissions.items.length === 0 ? (
+            <p className="empty-copy">No saved submissions yet.</p>
+          ) : null}
+          {identityAuditSavedSubmissions && identityAuditSavedSubmissions.items.length > 0 ? (
+            <div className="identity-audit-variant-list">
+              {identityAuditSavedSubmissions.items.map((item) => (
+                <div className="identity-audit-variant" key={`saved-submission-${item.id}`}>
+                  <div className="identity-audit-variant-main">
+                    <strong>#{item.id} • {item.status}</strong>
+                    <span>{new Date(item.created_at).toLocaleString()}</span>
+                    <span>
+                      {Number(item.summary.total_decisions ?? 0)} decisions • {item.warnings_count} warnings • {item.unknown_groups} unknown groups • {item.unknown_tracks} unknown tracks
+                    </span>
+                  </div>
+                  <div className="identity-audit-variant-stats">
+                    <button className="secondary-button" onClick={() => void viewIdentityAuditSavedSubmission(item.id)} type="button">View</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          {identityAuditSavedSubmissionDetailError ? <p className="empty-copy">{identityAuditSavedSubmissionDetailError}</p> : null}
+          {identityAuditSavedSubmissionDetailLoading ? <p className="empty-copy">Loading saved submission...</p> : null}
+          {identityAuditSavedSubmissionDetail ? (
+            <div>
+              <div className="tracks-formula-heading">
+                <h3>Saved Submission Detail</h3>
+                <span>#{identityAuditSavedSubmissionDetail.item.id}</span>
+              </div>
+              <div className="identity-audit-ambiguous-summary">
+                <button
+                  className="secondary-button"
+                  disabled={identityAuditSavedSubmissionDryRunLoading}
+                  onClick={() => void dryRunIdentityAuditSavedSubmission(identityAuditSavedSubmissionDetail.item.id)}
+                  type="button"
+                >
+                  {identityAuditSavedSubmissionDryRunLoading
+                    ? "Running dry run..."
+                    : identityAuditSavedSubmissionDryRun
+                      ? "Re-run Dry Run"
+                      : "Dry Run"}
+                </button>
+              </div>
+              <p className="empty-copy">Dry run only. No changes applied.</p>
+              <div className="identity-audit-stats">
+                <span className="identity-audit-stat"><span>Status</span><strong>{identityAuditSavedSubmissionDetail.item.status}</strong></span>
+                <span className="identity-audit-stat"><span>Created</span><strong>{new Date(identityAuditSavedSubmissionDetail.item.created_at).toLocaleString()}</strong></span>
+                <span className="identity-audit-stat"><span>Total</span><strong>{identityAuditSavedSubmissionDetail.item.validation.summary.total_decisions}</strong></span>
+                <span className="identity-audit-stat"><span>Groups</span><strong>{identityAuditSavedSubmissionDetail.item.validation.summary.group_decisions}</strong></span>
+                <span className="identity-audit-stat"><span>Tracks</span><strong>{identityAuditSavedSubmissionDetail.item.validation.summary.track_decisions}</strong></span>
+              </div>
+              <div className="identity-audit-stats">
+                <span className="identity-audit-stat"><span>Approved</span><strong>{identityAuditSavedSubmissionDetail.item.validation.summary.approved}</strong></span>
+                <span className="identity-audit-stat"><span>Rejected</span><strong>{identityAuditSavedSubmissionDetail.item.validation.summary.rejected}</strong></span>
+                <span className="identity-audit-stat"><span>Skipped</span><strong>{identityAuditSavedSubmissionDetail.item.validation.summary.skipped}</strong></span>
+                <span className="identity-audit-stat"><span>Warnings</span><strong>{identityAuditSavedSubmissionDetail.item.validation.summary.warnings}</strong></span>
+              </div>
+              {identityAuditSavedSubmissionDryRunError ? <p className="empty-copy">{identityAuditSavedSubmissionDryRunError}</p> : null}
+              {identityAuditSavedSubmissionDryRun ? (
+                <div className="identity-audit-group">
+                  <div className="tracks-formula-heading">
+                    <h3>Dry Run Result</h3>
+                    <span>#{identityAuditSavedSubmissionDryRun.submission_id} • {identityAuditSavedSubmissionDryRun.status}</span>
+                  </div>
+                  {identityAuditSavedSubmissionDryRunAt ? (
+                    <p className="empty-copy">Dry run at {new Date(identityAuditSavedSubmissionDryRunAt).toLocaleTimeString()}</p>
+                  ) : null}
+                  <div className="identity-audit-stats">
+                    <span className="identity-audit-stat"><span>Would apply</span><strong>{identityAuditSavedSubmissionDryRun.summary.would_apply}</strong></span>
+                    <span className="identity-audit-stat"><span>Approved groups</span><strong>{identityAuditSavedSubmissionDryRun.summary.approved_groups}</strong></span>
+                    <span className="identity-audit-stat"><span>Approved tracks</span><strong>{identityAuditSavedSubmissionDryRun.summary.approved_tracks}</strong></span>
+                    <span className="identity-audit-stat"><span>Rejected no-ops</span><strong>{identityAuditSavedSubmissionDryRun.summary.rejected}</strong></span>
+                    <span className="identity-audit-stat"><span>Skipped no-ops</span><strong>{identityAuditSavedSubmissionDryRun.summary.skipped}</strong></span>
+                  </div>
+                  <div className="identity-audit-stats">
+                    <span className="identity-audit-stat"><span>Warnings</span><strong>{identityAuditSavedSubmissionDryRun.summary.warnings}</strong></span>
+                    <span className="identity-audit-stat"><span>Unknown groups</span><strong>{identityAuditSavedSubmissionDryRun.summary.unknown_groups}</strong></span>
+                    <span className="identity-audit-stat"><span>Unknown tracks</span><strong>{identityAuditSavedSubmissionDryRun.summary.unknown_tracks}</strong></span>
+                  </div>
+                  {identityAuditSavedSubmissionDryRun.warnings.length > 0 ? (
+                    <div className="identity-audit-variant-list">
+                      {identityAuditSavedSubmissionDryRun.warnings.map((warning, index) => (
+                        <div className="identity-audit-variant" key={`dry-run-warning-${index}`}>
+                          <div className="identity-audit-variant-main">
+                            <strong>Warning</strong>
+                            <span>{warning}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                  <div className="identity-audit-group">
+                    <div className="tracks-formula-heading">
+                      <h3>Plan</h3>
+                      <span>{identityAuditSavedSubmissionDryRun.plan.groups.length + identityAuditSavedSubmissionDryRun.plan.tracks.length} items</span>
+                    </div>
+                    {identityAuditSavedSubmissionDryRun.plan.groups.length === 0 && identityAuditSavedSubmissionDryRun.plan.tracks.length === 0 ? (
+                      <p className="empty-copy">No plan items.</p>
+                    ) : (
+                      <div className="identity-audit-variant-list">
+                        {identityAuditSavedSubmissionDryRun.plan.groups.map((item, index) => (
+                          <div className="identity-audit-variant" key={`dry-run-group-${index}`}>
+                            <div className="identity-audit-variant-main">
+                              <strong>{String(item.label ?? item.id ?? "Group item")}</strong>
+                              <span>{String(item.action ?? "would_accept_group")}</span>
+                              <code>{String(item.decision_key ?? "")}</code>
+                            </div>
+                          </div>
+                        ))}
+                        {identityAuditSavedSubmissionDryRun.plan.tracks.map((item, index) => (
+                          <div className="identity-audit-variant" key={`dry-run-track-${index}`}>
+                            <div className="identity-audit-variant-main">
+                              <strong>{String(item.label ?? item.id ?? "Track item")}</strong>
+                              <span>{String(item.action ?? "would_accept_track_mapping")}</span>
+                              <code>{String(item.decision_key ?? "")}</code>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+        <div className="identity-audit-group">
+          <div className="tracks-formula-heading">
+            <h3>Suggested Group Queue</h3>
+            <span>{suggestedItems.length} groups</span>
+          </div>
+          {identityAuditSuggestedError ? <p className="empty-copy">{identityAuditSuggestedError}</p> : null}
+          {!identityAuditSuggestedGroups && !identityAuditSuggestedError ? (
+            <p className="empty-copy">{identityAuditSuggestedLoading ? "Loading suggested groups..." : "Suggested groups are not loaded yet."}</p>
+          ) : null}
+          {suggestedItems.length > 0 ? (
+            <div className="identity-audit-examples">
+              {suggestedItems.map((group) => {
+                const decisionKey = groupDecisionKey(group);
+                const decision = identityAuditLocalDecisions[decisionKey] ?? {
+                  verdict: "unsure" as LocalReviewVerdict,
+                  grouping_target: null,
+                  note: "",
+                  updated_at_ms: 0,
+                };
+                return (
+                  <article className="identity-audit-example" key={`suggested-${group.analysis_track_id}`}>
+                    <div className="identity-audit-example-header">
+                      <div>
+                        <h4>{group.analysis_track_name || `Analysis Track ${group.analysis_track_id}`}</h4>
+                        <p>{group.match_method || "suggested"} | {Math.round(group.confidence * 100)}% confidence</p>
+                      </div>
+                      <span className="identity-audit-type-badge">Suggested group</span>
+                    </div>
+                    <div className="identity-audit-stats">
+                      <span className="identity-audit-stat"><span>Release tracks</span><strong>{group.release_track_count}</strong></span>
+                      {group.song_family_key ? <span className="identity-audit-stat"><span>Family key</span><strong>{group.song_family_key}</strong></span> : null}
+                    </div>
+                    <div className="identity-audit-review-controls">
+                      <label>
+                        Decision
+                        <select
+                          onChange={(event) => {
+                            const nextVerdict = event.target.value as LocalReviewVerdict;
+                            updateLocalReviewDecision(decisionKey, {
+                              verdict: nextVerdict,
+                              grouping_target: nextVerdict === "good_to_group" ? (decision.grouping_target ?? "same_composition") : null,
+                            });
+                          }}
+                          value={decision.verdict}
+                        >
+                          <option value="unsure">Unreviewed</option>
+                          <option value="good_to_group">Good to group</option>
+                          <option value="not_good">Not good</option>
+                          <option value="skipped">Skipped</option>
+                        </select>
+                      </label>
+                      <label>
+                        Grouping target
+                        <select
+                          disabled={decision.verdict !== "good_to_group"}
+                          onChange={(event) =>
+                            updateLocalReviewDecision(decisionKey, {
+                              grouping_target: event.target.value as Exclude<LocalGroupingTarget, null>,
+                            })}
+                          value={decision.grouping_target ?? "same_composition"}
+                        >
+                          <option value="same_composition">Needs composition-level grouping</option>
+                          <option value="same_release_track_only">Same release track only</option>
+                        </select>
+                      </label>
+                    </div>
+                    <label className="identity-audit-review-note">
+                      Note
+                      <textarea
+                        onChange={(event) => updateLocalReviewDecision(decisionKey, { note: event.target.value })}
+                        placeholder="Optional review context"
+                        rows={2}
+                        value={decision.note}
+                      />
+                    </label>
+                    <div className="identity-audit-variant-list">
+                      {group.release_tracks.map((releaseTrack) => (
+                        <div className="identity-audit-variant" key={`group-${group.analysis_track_id}-${releaseTrack.release_track_id}`}>
+                          <div className="identity-audit-variant-main">
+                            <strong>{releaseTrack.release_track_name}</strong>
+                            <span>{releaseTrack.primary_artists || "Unknown artists"}</span>
+                            <code>release {releaseTrack.release_track_id}</code>
+                          </div>
+                          <div className="identity-audit-variant-stats">
+                            {releaseTrack.album_names ? <span>{releaseTrack.album_names}</span> : null}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          ) : identityAuditSuggestedGroups ? (
+            <p className="empty-copy">No suggested groups returned.</p>
+          ) : null}
+        </div>
+        <div className="identity-audit-group">
+          <div className="tracks-formula-heading">
+            <h3>Ambiguous Track Queue</h3>
+            <span>{filteredItems.length} rows</span>
+          </div>
+          {identityAuditAmbiguousError ? <p className="empty-copy">{identityAuditAmbiguousError}</p> : null}
+          {!identityAuditAmbiguous && !identityAuditAmbiguousError ? (
+            <p className="empty-copy">{identityAuditAmbiguousLoading ? "Loading ambiguous queue..." : "Ambiguous queue is not loaded yet."}</p>
+          ) : null}
+          {identityAuditAmbiguous?.parse_warning ? (
+            <p className="empty-copy">Parser warning: {identityAuditAmbiguous.parse_warning}</p>
+          ) : null}
+          {visibleItems.length > 0 ? (
+            <div className="identity-audit-examples">
+              {visibleItems.map((item) => {
+                const decision = identityAuditLocalDecisions[trackDecisionKey(item)] ?? {
+                  verdict: "unsure" as LocalReviewVerdict,
+                  grouping_target: null,
+                  note: "",
+                  updated_at_ms: 0,
+                };
+                return (
+                  <article className="identity-audit-example" key={`ambiguous-${item.entry_id}`}>
+                  <div className="identity-audit-example-header">
+                    <div>
+                      <h4>{item.release_track_name}</h4>
+                      <p>{item.artist_name} | {item.bucket} | {item.analysis_name ?? "no analysis mapping"}</p>
+                    </div>
+                    <span className="identity-audit-type-badge">{item.dominant_family ?? "ambiguous"}</span>
+                  </div>
+                  <div className="identity-audit-stats">
+                    <span className="identity-audit-stat"><span>release</span><strong>{item.release_track_id}</strong></span>
+                    {item.confidence != null ? <span className="identity-audit-stat"><span>confidence</span><strong>{Math.round(item.confidence * 100)}%</strong></span> : null}
+                    {item.song_family_key ? <span className="identity-audit-stat"><span>family key</span><strong>{item.song_family_key}</strong></span> : null}
+                    {item.review_families.map((family) => (
+                      <span className="identity-audit-stat" key={`${item.entry_id}-${family}`}><span>rule</span><strong>{family}</strong></span>
+                    ))}
+                  </div>
+                  <div className="identity-audit-review-controls">
+                    <label>
+                      Decision
+                      <select
+                        onChange={(event) => {
+                          const nextVerdict = event.target.value as LocalReviewVerdict;
+                          updateLocalReviewDecision(trackDecisionKey(item), {
+                            verdict: nextVerdict,
+                            grouping_target: nextVerdict === "good_to_group" ? (decision.grouping_target ?? "same_composition") : null,
+                          });
+                        }}
+                        value={decision.verdict}
+                      >
+                        <option value="unsure">Unreviewed</option>
+                        <option value="good_to_group">Good to group</option>
+                        <option value="not_good">Not good</option>
+                        <option value="skipped">Skipped</option>
+                      </select>
+                    </label>
+                    <label>
+                      Grouping target
+                      <select
+                        disabled={decision.verdict !== "good_to_group"}
+                        onChange={(event) =>
+                          updateLocalReviewDecision(trackDecisionKey(item), {
+                            grouping_target: event.target.value as Exclude<LocalGroupingTarget, null>,
+                          })}
+                        value={decision.grouping_target ?? "same_composition"}
+                      >
+                        <option value="same_composition">Needs composition-level grouping</option>
+                        <option value="same_release_track_only">Same release track only</option>
+                      </select>
+                    </label>
+                  </div>
+                  <label className="identity-audit-review-note">
+                    Note
+                    <textarea
+                      onChange={(event) => updateLocalReviewDecision(trackDecisionKey(item), { note: event.target.value })}
+                      placeholder="Optional review context"
+                      rows={2}
+                      value={decision.note}
+                    />
+                  </label>
+                </article>
+                );
+              })}
+            </div>
+          ) : identityAuditAmbiguous ? (
+            <p className="empty-copy">No ambiguous rows match the current filters.</p>
+          ) : null}
+          {filteredItems.length > visibleItems.length ? (
+            <div className="identity-audit-load-more-row">
+              <button
+                className="secondary-button"
+                onClick={() => setIdentityAuditAmbiguousVisibleCount((current) => current + IDENTITY_AUDIT_AMBIGUOUS_VISIBLE_STEP)}
+                type="button"
+              >
+                Show more ({filteredItems.length - visibleItems.length} remaining)
+              </button>
+            </div>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
+  function renderIdentityAuditPage() {
+    if (!profile) {
+      return null;
+    }
+    const tabs: Array<{ value: IdentityAuditTab; label: string }> = [
+      { value: "overview", label: "Overview" },
+      { value: "canonical", label: "Canonical Splits" },
+      { value: "release", label: "Release" },
+      { value: "composition", label: "Composition Groups" },
+      { value: "family", label: "Family" },
+    ];
+
+    return (
+      <section className="info-card info-card-wide tracks-only-card" id="identity-audit-page">
+        <div className="tracks-only-header">
+          <div>
+            <h2>Identity Audit</h2>
+            <p className="tracks-only-subtitle">
+              Review split-track examples and ambiguous rule families before any grouping behavior is promoted.
+            </p>
+          </div>
+          <div className="section-column-header-actions">
+            <button
+              className="secondary-button tracks-page-link-button"
+              disabled={identityAuditLoading || identityAuditSuggestedLoading || identityAuditAmbiguousLoading}
+              onClick={() => {
+                void loadIdentityAudit(true);
+                void loadIdentityAuditSuggestedGroups(true);
+                void loadIdentityAuditAmbiguousReview(true);
+              }}
+              type="button"
+            >
+              {(identityAuditLoading || identityAuditSuggestedLoading || identityAuditAmbiguousLoading) ? "Reloading..." : "Reload all"}
+            </button>
+            <button
+              className="secondary-button tracks-only-back-button"
+              onClick={() => setAppPage("dashboard")}
+              type="button"
+            >
+              Back to dashboard
+            </button>
+          </div>
+        </div>
+        <div className="tracks-only-summary">
+          <span>Identity samples: {identityAudit ? `${identityAudit.limit} per group` : "not loaded"}</span>
+          <span>Suggested groups: {identityAuditSuggestedGroups?.summary.total_groups ?? 0}</span>
+          <span>Ambiguous queue: {identityAuditAmbiguous?.summary.total_review_entries ?? 0}</span>
+          {identityAuditLastLoadedAt ? <span>Identity loaded {new Date(identityAuditLastLoadedAt).toLocaleTimeString()}</span> : null}
+          {identityAuditSuggestedLastLoadedAt ? <span>Suggested loaded {new Date(identityAuditSuggestedLastLoadedAt).toLocaleTimeString()}</span> : null}
+          {identityAuditAmbiguousLastLoadedAt ? <span>Ambiguous loaded {new Date(identityAuditAmbiguousLastLoadedAt).toLocaleTimeString()}</span> : null}
+        </div>
+        <div className="track-ranking-toggle identity-audit-tabs" role="group" aria-label="Identity audit sections">
+          {tabs.map((tab) => (
+            <button
+              className={`track-ranking-chip${identityAuditTab === tab.value ? " track-ranking-chip-active" : ""}`}
+              key={`identity-tab-${tab.value}`}
+              onClick={() => setIdentityAuditTab(tab.value)}
+              type="button"
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+        {identityAuditTab === "overview" ? renderIdentityAuditOverviewTab() : null}
+        {identityAuditTab === "canonical" ? renderIdentityAuditCanonicalTab() : null}
+        {identityAuditTab === "release" ? renderIdentityAuditReleaseTab() : null}
+        {identityAuditTab === "composition" ? renderIdentityAuditCompositionTab() : null}
+        {identityAuditTab === "family" ? renderIdentityAuditAmbiguousTab() : null}
+      </section>
+    );
+  }
+
+  function renderCatalogBackfillPage() {
+    if (!profile) {
+      return null;
+    }
+
+    const latestDisplayRun = catalogBackfillLatestResult ?? catalogBackfillCoverage?.latest_run ?? null;
+    const coveragePercent = typeof catalogBackfillCoverage?.track_duration_coverage_percent === "number"
+      ? `${catalogBackfillCoverage.track_duration_coverage_percent.toFixed(2)}%`
+      : "0.00%";
+    const latestWarnings = Array.isArray((latestDisplayRun as { warnings?: unknown[] } | null)?.warnings)
+      ? ((latestDisplayRun as { warnings?: string[] }).warnings ?? [])
+      : [];
+    const latestWarningsCount = latestWarnings.length > 0
+      ? latestWarnings.length
+      : (latestDisplayRun?.warnings_count ?? 0);
+    const showLatestLastError = Boolean(latestDisplayRun?.last_error) && (latestDisplayRun?.status ?? "unknown") !== "ok";
+
+    return (
+      <section className="info-card info-card-wide tracks-only-card" id="catalog-backfill-page">
+        <div className="tracks-only-header">
+          <div>
+            <h2>Catalog Backfill</h2>
+            <p className="tracks-only-subtitle">Run and monitor Spotify catalog enrichment for static track and album metadata.</p>
+            <p className="empty-copy">Catalog enrichment only. No identity mappings are changed.</p>
+          </div>
+          <div className="section-column-header-actions">
+            <button
+              className="secondary-button"
+              disabled={catalogBackfillCoverageLoading || catalogBackfillRunsLoading || catalogBackfillQueueLoading}
+              onClick={() => {
+                void loadCatalogBackfillCoverage(true);
+                void loadCatalogBackfillRuns(true);
+                void loadCatalogBackfillQueue(true);
+              }}
+              type="button"
+            >
+              {(catalogBackfillCoverageLoading || catalogBackfillRunsLoading || catalogBackfillQueueLoading) ? "Refreshing..." : "Refresh all"}
+            </button>
+            <button
+              className="secondary-button tracks-only-back-button"
+              onClick={() => setAppPage("dashboard")}
+              type="button"
+            >
+              Back to dashboard
+            </button>
+          </div>
+        </div>
+
+        <div className="tracks-only-summary">
+          <span>Known release tracks: {catalogBackfillCoverage?.known_release_tracks ?? 0}</span>
+          <span>Track catalog rows: {catalogBackfillCoverage?.track_catalog_rows ?? 0}</span>
+          <span>Duration coverage: {catalogBackfillCoverage?.track_duration_coverage_count ?? 0} ({coveragePercent})</span>
+          <span>Known release albums: {catalogBackfillCoverage?.known_release_albums ?? 0}</span>
+          <span>Album catalog rows: {catalogBackfillCoverage?.album_catalog_rows ?? 0}</span>
+          <span>Album track rows: {catalogBackfillCoverage?.album_track_rows ?? 0}</span>
+          <span>Recent run errors: {catalogBackfillCoverage?.recent_errors_count ?? 0}</span>
+          {catalogBackfillCoverageLastLoadedAt ? <span>Coverage loaded {new Date(catalogBackfillCoverageLastLoadedAt).toLocaleTimeString()}</span> : null}
+        </div>
+
+        <div className="info-card-body">
+          <h3>Coverage</h3>
+          {catalogBackfillCoverageError ? <p className="empty-copy">{catalogBackfillCoverageError}</p> : null}
+          {!catalogBackfillCoverage && catalogBackfillCoverageLoading ? <p className="empty-copy">Loading coverage...</p> : null}
+          {catalogBackfillCoverage?.latest_run ? (
+            <p className="empty-copy">
+              Latest run {catalogBackfillCoverage.latest_run.id}: {catalogBackfillCoverage.latest_run.status ?? "unknown"} | started{" "}
+              {formatDebugTimestamp(catalogBackfillCoverage.latest_run.started_at)}
+            </p>
+          ) : (
+            <p className="empty-copy">No catalog backfill runs recorded yet.</p>
+          )}
+        </div>
+
+        <div className="info-card-body">
+          <h3>Run Backfill</h3>
+          <div className="identity-audit-ambiguous-toolbar">
+            <label>
+              Limit
+              <input
+                min={1}
+                onChange={(event) => setCatalogBackfillLimit(Math.max(1, Number(event.target.value) || 1))}
+                type="number"
+                value={catalogBackfillLimit}
+              />
+            </label>
+            <label>
+              Offset
+              <input
+                min={0}
+                onChange={(event) => setCatalogBackfillOffset(Math.max(0, Number(event.target.value) || 0))}
+                type="number"
+                value={catalogBackfillOffset}
+              />
+            </label>
+            <label>
+              Market
+              <input
+                onChange={(event) => setCatalogBackfillMarket(event.target.value.toUpperCase())}
+                type="text"
+                value={catalogBackfillMarket}
+              />
+            </label>
+            <label>
+              Request delay (s)
+              <input
+                min={0.2}
+                onChange={(event) => setCatalogBackfillRequestDelaySeconds(Math.max(0.2, Number(event.target.value) || 0.2))}
+                step={0.1}
+                type="number"
+                value={catalogBackfillRequestDelaySeconds}
+              />
+            </label>
+            <label>
+              Max runtime (s)
+              <input
+                max={300}
+                min={5}
+                onChange={(event) => setCatalogBackfillMaxRuntimeSeconds(Math.min(300, Math.max(5, Number(event.target.value) || 5)))}
+                type="number"
+                value={catalogBackfillMaxRuntimeSeconds}
+              />
+            </label>
+            <label>
+              Max requests
+              <input
+                max={1000}
+                min={1}
+                onChange={(event) => setCatalogBackfillMaxRequests(Math.min(1000, Math.max(1, Number(event.target.value) || 1)))}
+                type="number"
+                value={catalogBackfillMaxRequests}
+              />
+            </label>
+            <label>
+              Max errors
+              <input
+                max={100}
+                min={1}
+                onChange={(event) => setCatalogBackfillMaxErrors(Math.min(100, Math.max(1, Number(event.target.value) || 1)))}
+                type="number"
+                value={catalogBackfillMaxErrors}
+              />
+            </label>
+            <label>
+              Max album pages
+              <input
+                max={50}
+                min={1}
+                onChange={(event) => setCatalogBackfillMaxAlbumTracksPagesPerAlbum(Math.min(50, Math.max(1, Number(event.target.value) || 1)))}
+                type="number"
+                value={catalogBackfillMaxAlbumTracksPagesPerAlbum}
+              />
+            </label>
+            <label>
+              Album tracklist policy
+              <select
+                onChange={(event) =>
+                  setCatalogBackfillAlbumTracklistPolicy(
+                    (event.target.value as "all" | "priority_only" | "relevant_albums" | "none") ?? "relevant_albums",
+                  )
+                }
+                value={catalogBackfillAlbumTracklistPolicy}
+              >
+                <option value="all">All</option>
+                <option value="relevant_albums">Relevant albums</option>
+                <option value="priority_only">Prioritized only</option>
+                <option value="none">None</option>
+              </select>
+            </label>
+            <label>
+              Max 429 responses
+              <input
+                max={20}
+                min={1}
+                onChange={(event) => setCatalogBackfillMax429(Math.min(20, Math.max(1, Number(event.target.value) || 1)))}
+                type="number"
+                value={catalogBackfillMax429}
+              />
+            </label>
+            <label className="recent-debug-filter">
+              <input
+                checked={catalogBackfillIncludeAlbums}
+                onChange={(event) => setCatalogBackfillIncludeAlbums(event.currentTarget.checked)}
+                type="checkbox"
+              />
+              Include albums
+            </label>
+            <label className="recent-debug-filter">
+              <input
+                checked={catalogBackfillForceRefresh}
+                onChange={(event) => setCatalogBackfillForceRefresh(event.currentTarget.checked)}
+                type="checkbox"
+              />
+              Force refresh
+            </label>
+            <button
+              className="primary-button"
+              disabled={catalogBackfillRunLoading}
+              onClick={() => {
+                void runCatalogBackfill();
+              }}
+              type="button"
+            >
+              {catalogBackfillRunLoading ? "Running..." : "Run Backfill"}
+            </button>
+          </div>
+          <p className="empty-copy">
+            Runs are bounded. If a stop limit is reached, partial catalog rows are kept and you can continue with the next
+            offset.
+          </p>
+          {catalogBackfillRunError ? <p className="empty-copy">{catalogBackfillRunError}</p> : null}
+        </div>
+
+        <div className="info-card-body">
+          <h3>Latest Run Result</h3>
+          {!latestDisplayRun ? (
+            <p className="empty-copy">Run backfill to see latest results.</p>
+          ) : (
+            <div className="tracks-only-summary">
+              <span>Status: {latestDisplayRun.status ?? "unknown"}</span>
+              <span>Partial: {latestDisplayRun.partial ? "yes" : "no"}</span>
+              <span>Stop reason: {latestDisplayRun.stop_reason ?? "none"}</span>
+              <span>Tracks seen/fetched/upserted: {latestDisplayRun.tracks_seen} / {latestDisplayRun.tracks_fetched} / {latestDisplayRun.tracks_upserted}</span>
+              <span>Albums seen/fetched: {latestDisplayRun.albums_seen} / {latestDisplayRun.albums_fetched}</span>
+              <span>Album tracks upserted: {latestDisplayRun.album_tracks_upserted}</span>
+              <span>
+                Album tracklists seen/skipped/fetched: {latestDisplayRun.album_tracklists_seen ?? 0} /{" "}
+                {latestDisplayRun.album_tracklists_skipped_by_policy ?? 0} / {latestDisplayRun.album_tracklists_fetched ?? 0}
+              </span>
+              <span>Album tracklist policy: {latestDisplayRun.album_tracklist_policy ?? "all"}</span>
+              <span>Errors: {latestDisplayRun.errors}</span>
+              <span>Requests total: {latestDisplayRun.requests_total}</span>
+              <span>Requests 429: {latestDisplayRun.requests_429}</span>
+              <span>Max Retry-After: {latestDisplayRun.max_retry_after_seconds}</span>
+              {"last_retry_after_seconds" in latestDisplayRun ? (
+                <span>Last Retry-After: {latestDisplayRun.last_retry_after_seconds ?? 0}</span>
+              ) : null}
+              <span>Final delay: {latestDisplayRun.final_request_delay_seconds}</span>
+              <span>Has more: {latestDisplayRun.has_more ? "yes" : "no"}</span>
+              <span>Warnings: {latestWarningsCount}</span>
+              {latestWarnings.length > 0 ? <span>Warning details: {latestWarnings.join(" | ")}</span> : null}
+              {showLatestLastError ? <span>Last error: {latestDisplayRun.last_error}</span> : null}
+            </div>
+          )}
+        </div>
+
+        <div className="track-ranking-toggle" role="group" aria-label="Catalog backfill sections">
+          <button
+            className={`track-ranking-chip${catalogBackfillTab === "recentRuns" ? " track-ranking-chip-active" : ""}`}
+            onClick={() => setCatalogBackfillTab("recentRuns")}
+            type="button"
+          >
+            Recent Runs
+          </button>
+          <button
+            className={`track-ranking-chip${catalogBackfillTab === "queue" ? " track-ranking-chip-active" : ""}`}
+            onClick={() => setCatalogBackfillTab("queue")}
+            type="button"
+          >
+            Queue
+          </button>
+        </div>
+
+        {catalogBackfillTab === "recentRuns" ? (
+          <div className="info-card-body">
+            <div className="section-column-header">
+              <h3>Recent Runs</h3>
+              <button
+                className="secondary-button"
+                disabled={catalogBackfillRunsLoading}
+                onClick={() => void loadCatalogBackfillRuns(true)}
+                type="button"
+              >
+                {catalogBackfillRunsLoading ? "Refreshing..." : "Refresh"}
+              </button>
+            </div>
+            {catalogBackfillRunsError ? <p className="empty-copy">{catalogBackfillRunsError}</p> : null}
+            {!catalogBackfillRuns && catalogBackfillRunsLoading ? <p className="empty-copy">Loading recent runs...</p> : null}
+            {catalogBackfillRunsLastLoadedAt ? (
+              <p className="empty-copy">Runs loaded {new Date(catalogBackfillRunsLastLoadedAt).toLocaleTimeString()}</p>
+            ) : null}
+            {!catalogBackfillRuns || catalogBackfillRuns.items.length === 0 ? (
+              <p className="empty-copy">No runs available.</p>
+            ) : (
+              <div className="recent-debug-grid">
+                {catalogBackfillRuns.items.map((run) => (
+                  <div className="recent-debug-row" key={`catalog-run-${run.id}`}>
+                    {(() => {
+                      const runWarnings = Array.isArray(run.warnings) ? run.warnings : [];
+                      const runWarningsCount = runWarnings.length > 0 ? runWarnings.length : (run.warnings_count ?? 0);
+                      const runLastError = (run.status ?? "unknown") === "ok" ? "none" : (run.last_error ?? "none");
+                      return (
+                        <>
+                    <span className="recent-debug-key">
+                      Run {run.id} | {formatDebugTimestamp(run.started_at)} {"->"} {formatDebugTimestamp(run.completed_at)}
+                    </span>
+                    <span className="recent-debug-value">
+                      status={run.status ?? "unknown"}{run.status === "partial" ? " [PARTIAL/STOPPED]" : ""} | tracks={run.tracks_seen}/{run.tracks_fetched}/{run.tracks_upserted} | albums={run.albums_seen}/{run.albums_fetched} | album_tracks={run.album_tracks_upserted} | errors={run.errors} | requests_429={run.requests_429} | has_more={run.has_more ? "yes" : "no"} | warnings={runWarningsCount} | last_error={runLastError}
+                    </span>
+                    {runWarnings.length > 0 ? (
+                      <span className="recent-debug-value">warning_details={runWarnings.join(" | ")}</span>
+                    ) : null}
+                        </>
+                      );
+                    })()}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : null}
+
+        {catalogBackfillTab === "queue" ? (
+          <div className="info-card-body">
+            <div className="section-column-header">
+              <h3>Queue</h3>
+              <div className="section-column-header-actions">
+                <label>
+                  Status
+                  <select
+                    onChange={(event) => {
+                      const nextFilter = (event.target.value as "all" | "pending" | "done" | "error");
+                      setCatalogBackfillQueueStatusFilter(nextFilter);
+                      void loadCatalogBackfillQueue(true, nextFilter);
+                    }}
+                    value={catalogBackfillQueueStatusFilter}
+                  >
+                    <option value="all">All</option>
+                    <option value="pending">Pending</option>
+                    <option value="done">Done</option>
+                    <option value="error">Error</option>
+                  </select>
+                </label>
+                <button
+                  className="secondary-button"
+                  disabled={catalogBackfillQueueRepairLoading}
+                  onClick={() => {
+                    void repairCatalogBackfillQueueStatuses();
+                  }}
+                  type="button"
+                >
+                  {catalogBackfillQueueRepairLoading ? "Repairing..." : "Repair queue statuses"}
+                </button>
+                <button
+                  className="secondary-button"
+                  disabled={catalogBackfillQueueLoading}
+                  onClick={() => void loadCatalogBackfillQueue(true)}
+                  type="button"
+                >
+                  {catalogBackfillQueueLoading ? "Refreshing..." : "Refresh"}
+                </button>
+              </div>
+            </div>
+            <div className="tracks-only-summary">
+              <span>Pending: {catalogBackfillQueue?.counts.pending ?? 0}</span>
+              <span>Done: {catalogBackfillQueue?.counts.done ?? 0}</span>
+              <span>Error: {catalogBackfillQueue?.counts.error ?? 0}</span>
+              <span>Total: {catalogBackfillQueue?.total ?? 0}</span>
+            </div>
+            {catalogBackfillQueueRepairMessage ? <p className="empty-copy">{catalogBackfillQueueRepairMessage}</p> : null}
+            {catalogBackfillQueueError ? <p className="empty-copy">{catalogBackfillQueueError}</p> : null}
+            {!catalogBackfillQueue && catalogBackfillQueueLoading ? <p className="empty-copy">Loading queue...</p> : null}
+            {catalogBackfillQueueLastLoadedAt ? (
+              <p className="empty-copy">Queue loaded {new Date(catalogBackfillQueueLastLoadedAt).toLocaleTimeString()}</p>
+            ) : null}
+            {!catalogBackfillQueue || catalogBackfillQueue.items.length === 0 ? (
+              <p className="empty-copy">No queue items.</p>
+            ) : (
+              <div className="recent-debug-grid">
+                {catalogBackfillQueue.items.map((item) => (
+                  <div className="recent-debug-row" key={`catalog-queue-${item.id}`}>
+                    <span className="recent-debug-key">
+                      {item.entity_type}:{item.spotify_id} | status={item.status} | priority={item.priority} | attempts={item.attempts}
+                    </span>
+                    <span className="recent-debug-value">
+                      requested={formatDebugTimestamp(item.requested_at)} | last_attempted={formatDebugTimestamp(item.last_attempted_at)} | reason={item.reason ?? "none"} | last_error={item.last_error ?? "none"}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : null}
+      </section>
+    );
+  }
+
+  function renderSearchLookupPage() {
+    if (!profile) {
+      return null;
+    }
+
+    const isAlbumsLookup = searchLookupEntityType === "albums";
+    const isDuplicateAlbumsLookup = searchLookupEntityType === "duplicate_albums";
+    const visibleAlbumItems = albumCatalogLookupResult?.items ?? [];
+    const visibleTrackItems = trackCatalogLookupResult?.items ?? [];
+    const visibleIncompleteAlbumIds = Array.from(
+      new Set(
+        visibleAlbumItems
+          .filter((item) => albumLookupRowCanBulkPrioritize(item))
+          .map((item) => item.spotify_album_id)
+          .filter((spotifyAlbumId): spotifyAlbumId is string => Boolean(spotifyAlbumId)),
+      ),
+    );
+    const visibleIncompleteTrackIds = Array.from(
+      new Set(
+        visibleTrackItems
+          .filter((item) => trackLookupRowCanBulkPrioritize(item))
+          .map((item) => item.spotify_track_id)
+          .filter((spotifyTrackId): spotifyTrackId is string => Boolean(spotifyTrackId)),
+      ),
+    );
+    const statusBadgeColors: Record<string, { background: string; color: string; border: string }> = {
+      Complete: { background: "#e8f7ee", color: "#1c6b3d", border: "#bfe7cf" },
+      "Missing metadata": { background: "#fff7e6", color: "#8a5b00", border: "#f1ddb0" },
+      "Missing duration": { background: "#fff7e6", color: "#8a5b00", border: "#f1ddb0" },
+      "Tracklist incomplete": { background: "#fff3e8", color: "#8a4a1f", border: "#efd0b9" },
+      "Not queued": { background: "#f2f3f5", color: "#4f5663", border: "#d8dbe1" },
+      Pending: { background: "#e7f0ff", color: "#2252a3", border: "#c1d5ff" },
+      Done: { background: "#e9f7ee", color: "#1f6f40", border: "#c4e9d2" },
+      Error: { background: "#fdecec", color: "#9a1f1f", border: "#f2c3c3" },
+    };
+    const renderLookupStatusBadge = (label: string) => {
+      const colors = statusBadgeColors[label] ?? { background: "#f2f2f2", color: "#3a3a3a", border: "#d9d9d9" };
+      return (
+        <span
+          style={{
+            display: "inline-block",
+            padding: "2px 8px",
+            borderRadius: "999px",
+            fontSize: "12px",
+            fontWeight: 600,
+            whiteSpace: "nowrap",
+            background: colors.background,
+            color: colors.color,
+            border: `1px solid ${colors.border}`,
+          }}
+        >
+          {label}
+        </span>
+      );
+    };
+
+    return (
+      <section className="info-card info-card-wide tracks-only-card" id="search-lookup-page">
+        <div className="tracks-only-header">
+          <div>
+            <h2>Search / Lookup</h2>
+            <p className="tracks-only-subtitle">Read-only lookup tools for catalog and enrichment status.</p>
+          </div>
+          <div className="section-column-header-actions">
+            <button className="secondary-button tracks-only-back-button" onClick={() => setAppPage("dashboard")} type="button">
+              Back to dashboard
+            </button>
+          </div>
+        </div>
+
+        <div className="info-card-body">
+          <h3>{searchLookupEntityType === "albums" ? "Album Catalog Lookup" : searchLookupEntityType === "tracks" ? "Track Catalog Lookup" : "Duplicate Albums"}</h3>
+          <div className="identity-audit-ambiguous-toolbar">
+            <div className="track-ranking-toggle" role="group" aria-label="Lookup type">
+              <button
+                className={`track-ranking-chip${isAlbumsLookup ? " track-ranking-chip-active" : ""}`}
+                onClick={() => {
+                  setSearchLookupEntityType("albums");
+                  setAlbumCatalogLookupEnqueueError("");
+                  setAlbumCatalogLookupEnqueueResult(null);
+                }}
+                type="button"
+              >
+                Albums
+              </button>
+              <button
+                className={`track-ranking-chip${searchLookupEntityType === "tracks" ? " track-ranking-chip-active" : ""}`}
+                onClick={() => {
+                  setSearchLookupEntityType("tracks");
+                  setAlbumCatalogLookupEnqueueError("");
+                  setAlbumCatalogLookupEnqueueResult(null);
+                }}
+                type="button"
+              >
+                Tracks
+              </button>
+              <button
+                className={`track-ranking-chip${isDuplicateAlbumsLookup ? " track-ranking-chip-active" : ""}`}
+                onClick={() => {
+                  setSearchLookupEntityType("duplicate_albums");
+                  setAlbumCatalogLookupEnqueueError("");
+                  setAlbumCatalogLookupEnqueueResult(null);
+                }}
+                type="button"
+              >
+                Duplicate Albums
+              </button>
+            </div>
+            <label>
+              Query
+              <input
+                onChange={(event) => setAlbumCatalogLookupQ(event.target.value)}
+                placeholder={isAlbumsLookup ? "Album, artist, or Spotify album id" : isDuplicateAlbumsLookup ? "Not used for duplicate view" : "Track, artist, album, or Spotify track id"}
+                type="text"
+                value={albumCatalogLookupQ}
+                disabled={isDuplicateAlbumsLookup}
+              />
+            </label>
+            <label>
+              Catalog status
+              {isDuplicateAlbumsLookup ? (
+                <select disabled value="all">
+                  <option value="all">all</option>
+                </select>
+              ) : isAlbumsLookup ? (
+                <select
+                  onChange={(event) => setAlbumCatalogLookupStatus(event.target.value as "all" | "backfilled" | "not_backfilled" | "tracklist_complete" | "tracklist_incomplete" | "error")}
+                  value={albumCatalogLookupStatus}
+                >
+                  <option value="all">all</option>
+                  <option value="backfilled">backfilled</option>
+                  <option value="not_backfilled">not_backfilled</option>
+                  <option value="tracklist_complete">tracklist_complete</option>
+                  <option value="tracklist_incomplete">tracklist_incomplete</option>
+                  <option value="error">error</option>
+                </select>
+              ) : (
+                <select
+                  onChange={(event) => setTrackCatalogLookupStatus(event.target.value as "all" | "backfilled" | "not_backfilled" | "duration_missing" | "error")}
+                  value={trackCatalogLookupStatus}
+                >
+                  <option value="all">all</option>
+                  <option value="backfilled">backfilled</option>
+                  <option value="not_backfilled">not_backfilled</option>
+                  <option value="duration_missing">duration_missing</option>
+                  <option value="error">error</option>
+                </select>
+              )}
+            </label>
+            <label>
+              Queue status
+              <select
+                onChange={(event) => setSearchLookupQueueStatus(event.target.value as "all" | "not_queued" | "pending" | "done" | "error")}
+                value={searchLookupQueueStatus}
+                disabled={isDuplicateAlbumsLookup}
+              >
+                <option value="all">All queue states</option>
+                <option value="not_queued">Not queued</option>
+                <option value="pending">Pending</option>
+                <option value="done">Done</option>
+                <option value="error">Error</option>
+              </select>
+            </label>
+            <label>
+              Sort
+              <select
+                onChange={(event) => setSearchLookupSort(event.target.value as "default" | "recently_backfilled" | "name" | "incomplete_first")}
+                value={searchLookupSort}
+                disabled={isDuplicateAlbumsLookup}
+              >
+                <option value="default">Default</option>
+                <option value="recently_backfilled">Recently backfilled</option>
+                <option value="name">Name</option>
+                <option value="incomplete_first">Incomplete first</option>
+              </select>
+            </label>
+            <button
+              className="primary-button"
+              disabled={isDuplicateAlbumsLookup ? albumDuplicateLookupLoading : isAlbumsLookup ? albumCatalogLookupLoading : trackCatalogLookupLoading}
+              onClick={() => {
+                void loadActiveSearchLookup(true);
+              }}
+              type="button"
+            >
+              {isDuplicateAlbumsLookup ? (albumDuplicateLookupLoading ? "Loading..." : "Refresh") : isAlbumsLookup ? (albumCatalogLookupLoading ? "Searching..." : "Search") : (trackCatalogLookupLoading ? "Searching..." : "Search")}
+            </button>
+            <button
+              className="secondary-button"
+              disabled={isDuplicateAlbumsLookup || albumCatalogLookupEnqueueLoading || (isAlbumsLookup ? visibleIncompleteAlbumIds.length === 0 : visibleIncompleteTrackIds.length === 0)}
+              onClick={() => {
+                if (isAlbumsLookup) {
+                  void enqueueVisibleIncompleteLookupAlbums();
+                } else {
+                  void enqueueVisibleIncompleteLookupTracks();
+                }
+              }}
+              type="button"
+            >
+              {albumCatalogLookupEnqueueLoading
+                ? "Prioritizing..."
+                : isAlbumsLookup
+                  ? "Prioritize visible incomplete albums"
+                  : "Prioritize visible incomplete tracks"}
+            </button>
+          </div>
+          {isAlbumsLookup && albumCatalogLookupResult ? (
+            <p className="empty-copy">Visible incomplete albums with Spotify IDs: {visibleIncompleteAlbumIds.length}</p>
+          ) : null}
+          {isDuplicateAlbumsLookup && albumDuplicateLookupResult ? (
+            <p className="empty-copy">Duplicate Spotify album groups: {albumDuplicateLookupResult.total}</p>
+          ) : null}
+          {searchLookupEntityType === "tracks" && trackCatalogLookupResult ? (
+            <p className="empty-copy">Visible incomplete tracks with Spotify IDs: {visibleIncompleteTrackIds.length}</p>
+          ) : null}
+          <p className="empty-copy">Catalog status shows what data exists. Queue status shows whether backfill work is scheduled.</p>
+          <p className="empty-copy">Prioritized items are added to the catalog backfill queue. They are not fetched immediately.</p>
+          {albumCatalogLookupError ? <p className="empty-copy">{albumCatalogLookupError}</p> : null}
+          {trackCatalogLookupError ? <p className="empty-copy">{trackCatalogLookupError}</p> : null}
+          {albumDuplicateLookupError ? <p className="empty-copy">{albumDuplicateLookupError}</p> : null}
+          {albumCatalogLookupEnqueueError ? <p className="empty-copy">{albumCatalogLookupEnqueueError}</p> : null}
+          {albumCatalogLookupEnqueueResult ? (
+            <p className="empty-copy">
+              Added {albumCatalogLookupEnqueueResult.enqueued}, updated {albumCatalogLookupEnqueueResult.updated}, already complete {albumCatalogLookupEnqueueResult.already_complete}, invalid {albumCatalogLookupEnqueueResult.invalid}.
+            </p>
+          ) : null}
+          {isAlbumsLookup && !albumCatalogLookupResult && albumCatalogLookupLoading ? <p className="empty-copy">Loading albums...</p> : null}
+          {searchLookupEntityType === "tracks" && !trackCatalogLookupResult && trackCatalogLookupLoading ? <p className="empty-copy">Loading tracks...</p> : null}
+          {isDuplicateAlbumsLookup && !albumDuplicateLookupResult && albumDuplicateLookupLoading ? <p className="empty-copy">Loading duplicate album groups...</p> : null}
+          {isAlbumsLookup && albumCatalogLookupLastLoadedAt ? (
+            <p className="empty-copy">Albums loaded {new Date(albumCatalogLookupLastLoadedAt).toLocaleTimeString()}</p>
+          ) : null}
+          {searchLookupEntityType === "tracks" && trackCatalogLookupLastLoadedAt ? (
+            <p className="empty-copy">Tracks loaded {new Date(trackCatalogLookupLastLoadedAt).toLocaleTimeString()}</p>
+          ) : null}
+          {isDuplicateAlbumsLookup && albumDuplicateLookupLastLoadedAt ? (
+            <p className="empty-copy">Duplicate groups loaded {new Date(albumDuplicateLookupLastLoadedAt).toLocaleTimeString()}</p>
+          ) : null}
+          {isAlbumsLookup && (!albumCatalogLookupResult || albumCatalogLookupResult.items.length === 0) ? (
+            <p className="empty-copy">No matching albums.</p>
+          ) : null}
+          {isAlbumsLookup && albumCatalogLookupResult && albumCatalogLookupResult.items.length > 0 ? (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Album</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Artist</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Spotify Album</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Tracklist</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Status</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Queue</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Last Updated</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {albumCatalogLookupResult.items.map((item) => {
+                    const tracklistText = `${item.album_track_rows} / ${item.total_tracks ?? "?"} tracks`;
+                    const statusLabel = albumLookupStatusLabel(item);
+                    const queueLabel = queueStatusLabel(item.queue_status);
+                    const canPrioritize = albumLookupRowIsIncompleteForEnqueue(item);
+                    const isPendingQueue = rowIsPendingQueue(item.queue_status);
+                    const actionLabel = isPendingQueue ? "Prioritized" : (String(item.queue_status).toLowerCase() === "error" ? "Retry priority" : "Prioritize");
+                    return (
+                      <>
+                        <tr key={`album-lookup-${item.release_album_id}`}>
+                          <td style={{ padding: "8px", verticalAlign: "top", fontWeight: 600 }}>
+                            {item.spotify_album_id ? (
+                              <button
+                                className="jump-link"
+                                onClick={() => openAlbumLookupPreview(item)}
+                                type="button"
+                              >
+                                {item.release_album_name}
+                              </button>
+                            ) : (
+                              item.release_album_name
+                            )}
+                          </td>
+                          <td style={{ padding: "8px", verticalAlign: "top" }}>{item.artist_name}</td>
+                          <td style={{ padding: "8px", verticalAlign: "top", wordBreak: "break-word" }}>{item.spotify_album_id ?? "None"}</td>
+                          <td style={{ padding: "8px", verticalAlign: "top", whiteSpace: "nowrap" }}>{tracklistText}</td>
+                          <td style={{ padding: "8px", verticalAlign: "top" }}>{renderLookupStatusBadge(statusLabel)}</td>
+                          <td style={{ padding: "8px", verticalAlign: "top" }}>{renderLookupStatusBadge(queueLabel)}</td>
+                          <td style={{ padding: "8px", verticalAlign: "top", whiteSpace: "nowrap" }}>{formatDebugTimestamp(item.catalog_fetched_at)}</td>
+                          <td style={{ padding: "8px", verticalAlign: "top" }}>
+                            {canPrioritize ? (
+                              <button
+                                className="secondary-button"
+                                disabled={albumCatalogLookupEnqueueLoading || isPendingQueue}
+                                onClick={() => {
+                                  void enqueueVisibleIncompleteLookupAlbums([item]);
+                                }}
+                                type="button"
+                              >
+                                {albumCatalogLookupEnqueueLoading ? "Prioritizing..." : actionLabel}
+                              </button>
+                            ) : null}
+                          </td>
+                        </tr>
+                        {item.catalog_last_error ? (
+                          <tr key={`album-lookup-error-${item.release_album_id}`}>
+                            <td colSpan={8} style={{ padding: "0 8px 8px 8px", color: "rgba(0, 0, 0, 0.65)", fontSize: "12px", wordBreak: "break-word" }}>
+                              Error detail: {item.catalog_last_error}
+                            </td>
+                          </tr>
+                        ) : null}
+                      </>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+          {searchLookupEntityType === "tracks" && (!trackCatalogLookupResult || trackCatalogLookupResult.items.length === 0) ? (
+            <p className="empty-copy">No matching tracks.</p>
+          ) : null}
+          {isDuplicateAlbumsLookup && (!albumDuplicateLookupResult || albumDuplicateLookupResult.items.length === 0) ? (
+            <p className="empty-copy">No duplicate albums found.</p>
+          ) : null}
+          {searchLookupEntityType === "tracks" && trackCatalogLookupResult && trackCatalogLookupResult.items.length > 0 ? (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Track</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Artist</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Album</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Spotify Track</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Duration</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Status</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Queue</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Last Updated</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {trackCatalogLookupResult.items.map((item) => {
+                    const statusLabel = trackLookupStatusLabel(item);
+                    const queueLabel = queueStatusLabel(item.queue_status);
+                    const canPrioritize = trackLookupRowIsIncompleteForEnqueue(item);
+                    const isPendingQueue = rowIsPendingQueue(item.queue_status);
+                    const actionLabel = isPendingQueue ? "Prioritized" : (String(item.queue_status).toLowerCase() === "error" ? "Retry priority" : "Prioritize");
+                    return (
+                      <>
+                        <tr key={`track-lookup-${item.release_track_id}`}>
+                          <td style={{ padding: "8px", verticalAlign: "top", fontWeight: 600 }}>{item.release_track_name}</td>
+                          <td style={{ padding: "8px", verticalAlign: "top" }}>{item.artist_name}</td>
+                          <td style={{ padding: "8px", verticalAlign: "top" }}>{item.release_album_name}</td>
+                          <td style={{ padding: "8px", verticalAlign: "top", wordBreak: "break-word" }}>{item.spotify_track_id ?? "None"}</td>
+                          <td style={{ padding: "8px", verticalAlign: "top", whiteSpace: "nowrap" }}>{item.duration_display ?? "Unknown"}</td>
+                          <td style={{ padding: "8px", verticalAlign: "top" }}>{renderLookupStatusBadge(statusLabel)}</td>
+                          <td style={{ padding: "8px", verticalAlign: "top" }}>{renderLookupStatusBadge(queueLabel)}</td>
+                          <td style={{ padding: "8px", verticalAlign: "top", whiteSpace: "nowrap" }}>{formatDebugTimestamp(item.catalog_fetched_at)}</td>
+                          <td style={{ padding: "8px", verticalAlign: "top" }}>
+                            {canPrioritize ? (
+                              <button
+                                className="secondary-button"
+                                disabled={albumCatalogLookupEnqueueLoading || isPendingQueue}
+                                onClick={() => {
+                                  void enqueueVisibleIncompleteLookupTracks([item]);
+                                }}
+                                type="button"
+                              >
+                                {albumCatalogLookupEnqueueLoading ? "Prioritizing..." : actionLabel}
+                              </button>
+                            ) : null}
+                          </td>
+                        </tr>
+                        {item.catalog_last_error ? (
+                          <tr key={`track-lookup-error-${item.release_track_id}`}>
+                            <td colSpan={9} style={{ padding: "0 8px 8px 8px", color: "rgba(0, 0, 0, 0.65)", fontSize: "12px", wordBreak: "break-word" }}>
+                              Error detail: {item.catalog_last_error}
+                            </td>
+                          </tr>
+                        ) : null}
+                      </>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+          {isDuplicateAlbumsLookup && albumDuplicateLookupResult && albumDuplicateLookupResult.items.length > 0 ? (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Spotify Album</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Spotify Name</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Duplicate Count</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Release Album</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Artist</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Tracklist</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Catalog</th>
+                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Queue</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {albumDuplicateLookupResult.items.map((group) =>
+                    group.release_albums.map((item, index) => (
+                      <tr key={`duplicate-album-${group.spotify_album_id}-${item.release_album_id}`}>
+                        <td style={{ padding: "8px", verticalAlign: "top", wordBreak: "break-word" }}>{index === 0 ? group.spotify_album_id : ""}</td>
+                        <td style={{ padding: "8px", verticalAlign: "top" }}>{index === 0 ? (group.spotify_album_name ?? "Unknown") : ""}</td>
+                        <td style={{ padding: "8px", verticalAlign: "top", whiteSpace: "nowrap" }}>{index === 0 ? group.duplicate_count : ""}</td>
+                        <td style={{ padding: "8px", verticalAlign: "top", fontWeight: 600 }}>{item.release_album_name}</td>
+                        <td style={{ padding: "8px", verticalAlign: "top" }}>{item.artist_name}</td>
+                        <td style={{ padding: "8px", verticalAlign: "top", whiteSpace: "nowrap" }}>{item.album_track_rows} / {item.total_tracks ?? "?"} tracks</td>
+                        <td style={{ padding: "8px", verticalAlign: "top" }}>{item.catalog_status ?? "unknown"}</td>
+                        <td style={{ padding: "8px", verticalAlign: "top" }}>{item.queue_status}</td>
+                      </tr>
+                    )),
+                  )}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
         </div>
       </section>
     );
@@ -5188,9 +8963,351 @@ export function App() {
     return (await response.json()) as ListeningLogResponse;
   }
 
+  async function fetchCatalogBackfillCoverage(): Promise<CatalogBackfillCoverageResponse> {
+    const response = await fetch(`${apiBaseUrl}/debug/spotify/catalog-backfill/coverage`, {
+      credentials: "include",
+    });
+    if (!response.ok) {
+      let detail = "Failed to load catalog backfill coverage.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Catalog Backfill Coverage (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as CatalogBackfillCoverageResponse;
+  }
+
+  async function fetchCatalogBackfillRuns(limit: number = 20, offset: number = 0): Promise<CatalogBackfillRunsResponse> {
+    const response = await fetch(
+      `${apiBaseUrl}/debug/spotify/catalog-backfill/runs?limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`,
+      {
+        credentials: "include",
+      },
+    );
+    if (!response.ok) {
+      let detail = "Failed to load catalog backfill runs.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Catalog Backfill Runs (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as CatalogBackfillRunsResponse;
+  }
+
+  async function fetchCatalogBackfillQueue(
+    statusFilter: "all" | "pending" | "done" | "error" = "all",
+    limit: number = 50,
+    offset: number = 0
+  ): Promise<CatalogBackfillQueueResponse> {
+    const statusQuery = statusFilter === "all" ? "" : `&status=${encodeURIComponent(statusFilter)}`;
+    const response = await fetch(
+      `${apiBaseUrl}/debug/spotify/catalog-backfill/queue?limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}${statusQuery}`,
+      {
+        credentials: "include",
+      },
+    );
+    if (!response.ok) {
+      let detail = "Failed to load catalog backfill queue.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Catalog Backfill Queue (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as CatalogBackfillQueueResponse;
+  }
+
+  async function postCatalogBackfillQueueRepair(): Promise<CatalogBackfillQueueRepairResponse> {
+    const response = await fetch(`${apiBaseUrl}/debug/spotify/catalog-backfill/queue/repair`, {
+      method: "POST",
+      credentials: "include",
+    });
+    const payload = (await response.json()) as CatalogBackfillQueueRepairResponse | { detail?: string; error?: { message?: string } };
+    if (!response.ok || !("ok" in payload && payload.ok)) {
+      let detail = "Failed to repair queue statuses.";
+      if ("error" in payload && payload.error?.message) {
+        detail = payload.error.message;
+      } else if ("detail" in payload && payload.detail) {
+        detail = payload.detail;
+      }
+      throw new Error(`Catalog Backfill Queue Repair (${response.status}): ${detail}`);
+    }
+    return payload as CatalogBackfillQueueRepairResponse;
+  }
+
+  async function fetchAlbumCatalogLookup(
+    q: string,
+    catalogStatus: "all" | "backfilled" | "not_backfilled" | "tracklist_complete" | "tracklist_incomplete" | "error",
+    queueStatus: "all" | "not_queued" | "pending" | "done" | "error",
+    sort: "default" | "recently_backfilled" | "name" | "incomplete_first",
+    limit: number = 50,
+    offset: number = 0
+  ): Promise<AlbumCatalogLookupResponse> {
+    const qQuery = q.trim() ? `&q=${encodeURIComponent(q.trim())}` : "";
+    const response = await fetch(
+      `${apiBaseUrl}/debug/search/albums?catalog_status=${encodeURIComponent(catalogStatus)}&queue_status=${encodeURIComponent(queueStatus)}&sort=${encodeURIComponent(sort)}&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}${qQuery}`,
+      { credentials: "include" },
+    );
+    if (!response.ok) {
+      let detail = "Failed to search albums.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Album Catalog Lookup (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as AlbumCatalogLookupResponse;
+  }
+
+  async function fetchTrackCatalogLookup(
+    q: string,
+    catalogStatus: "all" | "backfilled" | "not_backfilled" | "duration_missing" | "error",
+    queueStatus: "all" | "not_queued" | "pending" | "done" | "error",
+    sort: "default" | "recently_backfilled" | "name" | "incomplete_first",
+    limit: number = 50,
+    offset: number = 0
+  ): Promise<TrackCatalogLookupResponse> {
+    const qQuery = q.trim() ? `&q=${encodeURIComponent(q.trim())}` : "";
+    const response = await fetch(
+      `${apiBaseUrl}/debug/search/tracks?catalog_status=${encodeURIComponent(catalogStatus)}&queue_status=${encodeURIComponent(queueStatus)}&sort=${encodeURIComponent(sort)}&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}${qQuery}`,
+      { credentials: "include" },
+    );
+    if (!response.ok) {
+      let detail = "Failed to search tracks.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Track Catalog Lookup (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as TrackCatalogLookupResponse;
+  }
+
+  async function fetchAlbumDuplicateLookup(
+    limit: number = 200,
+    offset: number = 0
+  ): Promise<AlbumDuplicateLookupResponse> {
+    const response = await fetch(
+      `${apiBaseUrl}/debug/search/albums/duplicates?limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`,
+      { credentials: "include" },
+    );
+    if (!response.ok) {
+      let detail = "Failed to load duplicate albums.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Album Duplicate Lookup (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as AlbumDuplicateLookupResponse;
+  }
+
+  async function fetchTrackDuplicateLookup(
+    limit: number = 200,
+    offset: number = 0
+  ): Promise<TrackDuplicateLookupResponse> {
+    const response = await fetch(
+      `${apiBaseUrl}/debug/search/tracks/duplicates?limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`,
+      { credentials: "include" },
+    );
+    if (!response.ok) {
+      let detail = "Failed to load duplicate tracks.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Track Duplicate Lookup (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as TrackDuplicateLookupResponse;
+  }
+
+  async function fetchAlbumNameDuplicateLookup(
+    limit: number = 200,
+    offset: number = 0
+  ): Promise<AlbumNameDuplicateLookupResponse> {
+    const response = await fetch(
+      `${apiBaseUrl}/debug/search/albums/duplicates-by-name?limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`,
+      { credentials: "include" },
+    );
+    if (!response.ok) {
+      let detail = "Failed to load duplicate albums by name.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Album Name Duplicate Lookup (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as AlbumNameDuplicateLookupResponse;
+  }
+
+  async function postReleaseAlbumMergePreview(releaseAlbumIds: number[]): Promise<ReleaseAlbumMergePreviewResponse> {
+    const response = await fetch(`${apiBaseUrl}/debug/identity/release-albums/merge-preview`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ release_album_ids: releaseAlbumIds }),
+    });
+    const payload = (await response.json()) as ReleaseAlbumMergePreviewResponse | { detail?: string };
+    if (!response.ok) {
+      let detail = "Failed to preview release album merge.";
+      if ("detail" in payload && payload.detail) {
+        detail = payload.detail;
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Release Album Merge Preview (${response.status}): ${detail}`);
+    }
+    return payload as ReleaseAlbumMergePreviewResponse;
+  }
+
+  async function postReleaseAlbumMergeDryRun(releaseAlbumIds: number[], survivorReleaseAlbumId: number): Promise<ReleaseAlbumMergeDryRunResponse> {
+    const response = await fetch(`${apiBaseUrl}/debug/identity/release-albums/merge-dry-run`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        release_album_ids: releaseAlbumIds,
+        survivor_release_album_id: survivorReleaseAlbumId,
+      }),
+    });
+    const payload = (await response.json()) as ReleaseAlbumMergeDryRunResponse | { detail?: string };
+    if (!response.ok) {
+      let detail = "Failed to dry run release album merge.";
+      if ("detail" in payload && payload.detail) {
+        detail = payload.detail;
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Release Album Merge Dry Run (${response.status}): ${detail}`);
+    }
+    return payload as ReleaseAlbumMergeDryRunResponse;
+  }
+
+  async function postCatalogBackfillRun(): Promise<CatalogBackfillRunResponse> {
+    const response = await fetch(`${apiBaseUrl}/debug/spotify/catalog-backfill`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        limit: Math.max(1, Math.round(catalogBackfillLimit)),
+        offset: Math.max(0, Math.round(catalogBackfillOffset)),
+        market: catalogBackfillMarket.trim() || "US",
+        include_albums: catalogBackfillIncludeAlbums,
+        force_refresh: catalogBackfillForceRefresh,
+        request_delay_seconds: Math.max(0.2, catalogBackfillRequestDelaySeconds),
+        max_runtime_seconds: Math.min(300, Math.max(5, Math.round(catalogBackfillMaxRuntimeSeconds))),
+        max_requests: Math.min(1000, Math.max(1, Math.round(catalogBackfillMaxRequests))),
+        max_errors: Math.min(100, Math.max(1, Math.round(catalogBackfillMaxErrors))),
+        max_album_tracks_pages_per_album: Math.min(50, Math.max(1, Math.round(catalogBackfillMaxAlbumTracksPagesPerAlbum))),
+        max_429: Math.min(20, Math.max(1, Math.round(catalogBackfillMax429))),
+        album_tracklist_policy: catalogBackfillAlbumTracklistPolicy,
+      }),
+    });
+    const payload = (await response.json()) as
+      | CatalogBackfillRunResponse
+      | { detail?: string; error?: { message?: string }; status?: string; last_error?: string | null };
+    if (!response.ok || !("ok" in payload && payload.ok)) {
+      let detail = "Catalog backfill failed.";
+      if ("error" in payload && payload.error?.message) {
+        detail = payload.error.message;
+      } else if ("detail" in payload && payload.detail) {
+        detail = payload.detail;
+      } else if ("last_error" in payload && payload.last_error) {
+        detail = payload.last_error;
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Catalog Backfill Run (${response.status}): ${detail}`);
+    }
+    return payload as CatalogBackfillRunResponse;
+  }
+
+  async function enqueueCatalogBackfillItems(
+    items: Array<{ entity_type: "track" | "album"; spotify_id: string; reason?: string; priority?: number }>
+  ): Promise<CatalogBackfillEnqueueResponse> {
+    const response = await fetch(`${apiBaseUrl}/debug/spotify/catalog-backfill/enqueue`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ items }),
+    });
+    const payload = (await response.json()) as CatalogBackfillEnqueueResponse | { detail?: string; error?: { message?: string } };
+    if (!response.ok || !("ok" in payload && payload.ok)) {
+      let detail = "Catalog enqueue failed.";
+      if ("error" in payload && payload.error?.message) {
+        detail = payload.error.message;
+      } else if ("detail" in payload && payload.detail) {
+        detail = payload.detail;
+      }
+      throw new Error(`Catalog Backfill Enqueue (${response.status}): ${detail}`);
+    }
+    return payload as CatalogBackfillEnqueueResponse;
+  }
+
   async function fetchMergedTrackAggregate(): Promise<MergedTrackAggregateResponse> {
     const response = await fetch(
-      `${apiBaseUrl}/debug/tracks/merged-aggregate?limit=200&recent_window_days=28&source_filter=all`,
+      `${apiBaseUrl}/tracks/merged-aggregate?limit=${TRACKS_FORMULA_FETCH_LIMIT}&recent_window_days=28&source_filter=all`,
       { credentials: "include" },
     );
     if (!response.ok) {
@@ -5209,6 +9326,314 @@ export function App() {
       throw new Error(`Merged Tracks (${response.status}): ${detail}`);
     }
     return (await response.json()) as MergedTrackAggregateResponse;
+  }
+
+  async function fetchIdentityAudit(): Promise<TrackIdentityAuditResponse> {
+    const response = await fetch(
+      `${apiBaseUrl}/debug/tracks/identity-audit?limit=5`,
+      { credentials: "include" },
+    );
+    if (!response.ok) {
+      let detail = "Failed to load identity audit.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Identity Audit (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as TrackIdentityAuditResponse;
+  }
+
+  async function fetchIdentityAuditSuggestedGroups(): Promise<SuggestedGroupsResponse> {
+    const response = await fetch(
+      `${apiBaseUrl}/debug/tracks/identity-audit/suggested-groups?limit=50&offset=0&status_filter=suggested`,
+      { credentials: "include" },
+    );
+    if (!response.ok) {
+      let detail = "Failed to load suggested composition groups.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Identity Audit Suggested Groups (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as SuggestedGroupsResponse;
+  }
+
+  async function fetchIdentityAuditAmbiguousReview(): Promise<AmbiguousReviewResponse> {
+    const response = await fetch(
+      `${apiBaseUrl}/debug/tracks/identity-audit/ambiguous-review?limit=500&offset=0`,
+      { credentials: "include" },
+    );
+    if (!response.ok) {
+      let detail = "Failed to load ambiguous review queue.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Identity Audit Ambiguous Review (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as AmbiguousReviewResponse;
+  }
+
+  async function fetchIdentityAuditSavedSubmissions(limit: number = 20, offset: number = 0): Promise<IdentityAuditSavedSubmissionListResponse> {
+    const response = await fetch(
+      `${apiBaseUrl}/debug/tracks/identity-audit/submissions?limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`,
+      { credentials: "include" },
+    );
+    if (!response.ok) {
+      let detail = "Failed to load saved submissions.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Identity Audit Saved Submissions (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as IdentityAuditSavedSubmissionListResponse;
+  }
+
+  async function fetchIdentityAuditSavedSubmissionById(submissionId: number): Promise<IdentityAuditSavedSubmissionReadResponse> {
+    const response = await fetch(
+      `${apiBaseUrl}/debug/tracks/identity-audit/submissions/${encodeURIComponent(String(submissionId))}`,
+      { credentials: "include" },
+    );
+    if (!response.ok) {
+      let detail = "Failed to load saved submission.";
+      try {
+        const payload = (await response.json()) as { detail?: string; error?: { message?: string } };
+        if (payload.error?.message) {
+          detail = payload.error.message;
+        } else if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Identity Audit Saved Submission (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as IdentityAuditSavedSubmissionReadResponse;
+  }
+
+  async function fetchIdentityAuditSavedSubmissionDryRun(submissionId: number): Promise<IdentityAuditSubmissionDryRunResponse> {
+    const response = await fetch(
+      `${apiBaseUrl}/debug/tracks/identity-audit/submissions/${encodeURIComponent(String(submissionId))}/dry-run`,
+      {
+        method: "POST",
+        credentials: "include",
+      },
+    );
+    if (!response.ok) {
+      let detail = "Failed to run dry run.";
+      try {
+        const payload = (await response.json()) as { detail?: string; error?: { message?: string } };
+        if (payload.error?.message) {
+          detail = payload.error.message;
+        } else if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Identity Audit Submission Dry Run (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as IdentityAuditSubmissionDryRunResponse;
+  }
+
+  async function loadMergedTrackRankings(reset: boolean = false) {
+    if (mergedTracksLoading) {
+      return;
+    }
+    if (reset) {
+      setMergedTracks([]);
+      setMergedTracksExcludedUnknownCount(0);
+      setMergedTracksLoaded(false);
+      setMergedTracksLastLoadedAt(null);
+    }
+    setMergedTracksLoading(true);
+    setMergedTracksError("");
+    try {
+      const data = await fetchMergedTrackAggregate();
+      setMergedTracks(data.items);
+      setMergedTracksExcludedUnknownCount(Math.max(0, data.excluded_unknown_identity_count ?? 0));
+      setMergedTracksLoaded(true);
+      setMergedTracksLastLoadedAt(Date.now());
+    } catch (error) {
+      setMergedTracksError(formatUiErrorMessage(error, "Failed to load merged tracks."));
+    } finally {
+      setMergedTracksLoading(false);
+    }
+  }
+
+  function reloadTrackRankings() {
+    void loadMergedTrackRankings(true);
+  }
+
+  async function loadIdentityAudit(reset: boolean = false) {
+    if (identityAuditLoading) {
+      return;
+    }
+    if (reset) {
+      setIdentityAudit(null);
+      setIdentityAuditLoaded(false);
+      setIdentityAuditLastLoadedAt(null);
+    }
+    setIdentityAuditLoading(true);
+    setIdentityAuditError("");
+    try {
+      const data = await fetchIdentityAudit();
+      setIdentityAudit(data);
+      setIdentityAuditLoaded(true);
+      setIdentityAuditLastLoadedAt(Date.now());
+    } catch (error) {
+      setIdentityAuditError(formatUiErrorMessage(error, "Failed to load identity audit."));
+    } finally {
+      setIdentityAuditLoading(false);
+    }
+  }
+
+  async function loadIdentityAuditSuggestedGroups(reset: boolean = false) {
+    if (identityAuditSuggestedLoading) {
+      return;
+    }
+    if (reset) {
+      setIdentityAuditSuggestedGroups(null);
+      setIdentityAuditSuggestedLoaded(false);
+      setIdentityAuditSuggestedLastLoadedAt(null);
+    }
+    setIdentityAuditSuggestedLoading(true);
+    setIdentityAuditSuggestedError("");
+    try {
+      const data = await fetchIdentityAuditSuggestedGroups();
+      setIdentityAuditSuggestedGroups(data);
+      setIdentityAuditSuggestedLoaded(true);
+      setIdentityAuditSuggestedLastLoadedAt(Date.now());
+    } catch (error) {
+      setIdentityAuditSuggestedError(formatUiErrorMessage(error, "Failed to load suggested composition groups."));
+    } finally {
+      setIdentityAuditSuggestedLoading(false);
+    }
+  }
+
+  async function loadIdentityAuditAmbiguousReview(reset: boolean = false) {
+    if (identityAuditAmbiguousLoading) {
+      return;
+    }
+    if (reset) {
+      setIdentityAuditAmbiguous(null);
+      setIdentityAuditAmbiguousLoaded(false);
+      setIdentityAuditAmbiguousLastLoadedAt(null);
+    }
+    setIdentityAuditAmbiguousLoading(true);
+    setIdentityAuditAmbiguousError("");
+    try {
+      const data = await fetchIdentityAuditAmbiguousReview();
+      setIdentityAuditAmbiguous(data);
+      setIdentityAuditAmbiguousLoaded(true);
+      setIdentityAuditAmbiguousLastLoadedAt(Date.now());
+    } catch (error) {
+      setIdentityAuditAmbiguousError(formatUiErrorMessage(error, "Failed to load ambiguous review queue."));
+    } finally {
+      setIdentityAuditAmbiguousLoading(false);
+    }
+  }
+
+  async function loadIdentityAuditSavedSubmissions(reset: boolean = false) {
+    if (identityAuditSavedSubmissionsLoading) {
+      return;
+    }
+    if (reset) {
+      setIdentityAuditSavedSubmissions(null);
+      setIdentityAuditSavedSubmissionDetail(null);
+      setIdentityAuditSavedSubmissionDetailError("");
+      setIdentityAuditSavedSubmissionDryRun(null);
+      setIdentityAuditSavedSubmissionDryRunError("");
+      setIdentityAuditSavedSubmissionDryRunLoading(false);
+      setIdentityAuditSavedSubmissionDryRunAt(null);
+    }
+    setIdentityAuditSavedSubmissionsLoading(true);
+    setIdentityAuditSavedSubmissionsError("");
+    try {
+      const data = await fetchIdentityAuditSavedSubmissions(20, 0);
+      setIdentityAuditSavedSubmissions(data);
+    } catch (error) {
+      setIdentityAuditSavedSubmissionsError(formatUiErrorMessage(error, "Failed to load saved submissions."));
+    } finally {
+      setIdentityAuditSavedSubmissionsLoading(false);
+    }
+  }
+
+  async function viewIdentityAuditSavedSubmission(submissionId: number) {
+    if (identityAuditSavedSubmissionDetailLoading) {
+      return;
+    }
+    setIdentityAuditSavedSubmissionDetailLoading(true);
+    setIdentityAuditSavedSubmissionDetailError("");
+    setIdentityAuditSavedSubmissionDryRun(null);
+    setIdentityAuditSavedSubmissionDryRunError("");
+    setIdentityAuditSavedSubmissionDryRunLoading(false);
+    setIdentityAuditSavedSubmissionDryRunAt(null);
+    try {
+      const payload = await fetchIdentityAuditSavedSubmissionById(submissionId);
+      setIdentityAuditSavedSubmissionDetail(payload);
+    } catch (error) {
+      setIdentityAuditSavedSubmissionDetailError(formatUiErrorMessage(error, "Failed to load saved submission details."));
+      setIdentityAuditSavedSubmissionDetail(null);
+    } finally {
+      setIdentityAuditSavedSubmissionDetailLoading(false);
+    }
+  }
+
+  async function dryRunIdentityAuditSavedSubmission(submissionId: number) {
+    if (identityAuditSavedSubmissionDryRunLoading) {
+      return;
+    }
+    setIdentityAuditSavedSubmissionDryRunLoading(true);
+    setIdentityAuditSavedSubmissionDryRunError("");
+    try {
+      const payload = await fetchIdentityAuditSavedSubmissionDryRun(submissionId);
+      setIdentityAuditSavedSubmissionDryRun(payload);
+      setIdentityAuditSavedSubmissionDryRunAt(Date.now());
+    } catch (error) {
+      setIdentityAuditSavedSubmissionDryRunError(formatUiErrorMessage(error, "Failed to run dry run."));
+      setIdentityAuditSavedSubmissionDryRun(null);
+      setIdentityAuditSavedSubmissionDryRunAt(null);
+    } finally {
+      setIdentityAuditSavedSubmissionDryRunLoading(false);
+    }
   }
 
   async function loadListeningLogBatch(reset: boolean = false) {
@@ -5236,6 +9661,337 @@ export function App() {
       }
     } finally {
       setListeningLogLoading(false);
+    }
+  }
+
+  async function loadCatalogBackfillCoverage(reset: boolean = false) {
+    if (catalogBackfillCoverageLoading) {
+      return;
+    }
+    if (reset) {
+      setCatalogBackfillCoverage(null);
+      setCatalogBackfillCoverageLoaded(false);
+      setCatalogBackfillCoverageLastLoadedAt(null);
+    }
+    setCatalogBackfillCoverageLoading(true);
+    setCatalogBackfillCoverageError("");
+    try {
+      const payload = await fetchCatalogBackfillCoverage();
+      setCatalogBackfillCoverage(payload);
+      setCatalogBackfillCoverageLoaded(true);
+      setCatalogBackfillCoverageLastLoadedAt(Date.now());
+    } catch (error) {
+      setCatalogBackfillCoverageError(formatUiErrorMessage(error, "Failed to load catalog coverage."));
+    } finally {
+      setCatalogBackfillCoverageLoading(false);
+    }
+  }
+
+  async function loadCatalogBackfillRuns(reset: boolean = false) {
+    if (catalogBackfillRunsLoading) {
+      return;
+    }
+    if (reset) {
+      setCatalogBackfillRuns(null);
+      setCatalogBackfillRunsLoaded(false);
+      setCatalogBackfillRunsLastLoadedAt(null);
+    }
+    setCatalogBackfillRunsLoading(true);
+    setCatalogBackfillRunsError("");
+    try {
+      const payload = await fetchCatalogBackfillRuns(20, 0);
+      setCatalogBackfillRuns(payload);
+      setCatalogBackfillRunsLoaded(true);
+      setCatalogBackfillRunsLastLoadedAt(Date.now());
+    } catch (error) {
+      setCatalogBackfillRunsError(formatUiErrorMessage(error, "Failed to load backfill runs."));
+    } finally {
+      setCatalogBackfillRunsLoading(false);
+    }
+  }
+
+  async function loadCatalogBackfillQueue(
+    reset: boolean = false,
+    explicitFilter?: "all" | "pending" | "done" | "error"
+  ) {
+    if (catalogBackfillQueueLoading) {
+      return;
+    }
+    if (reset) {
+      setCatalogBackfillQueue(null);
+      setCatalogBackfillQueueLoaded(false);
+      setCatalogBackfillQueueLastLoadedAt(null);
+    }
+    const activeFilter = explicitFilter ?? catalogBackfillQueueStatusFilter;
+    if (explicitFilter && explicitFilter !== catalogBackfillQueueStatusFilter) {
+      setCatalogBackfillQueueStatusFilter(explicitFilter);
+    }
+    setCatalogBackfillQueueLoading(true);
+    setCatalogBackfillQueueError("");
+    try {
+      const payload = await fetchCatalogBackfillQueue(activeFilter, 50, 0);
+      setCatalogBackfillQueue(payload);
+      setCatalogBackfillQueueLoaded(true);
+      setCatalogBackfillQueueLastLoadedAt(Date.now());
+    } catch (error) {
+      setCatalogBackfillQueueError(formatUiErrorMessage(error, "Failed to load backfill queue."));
+    } finally {
+      setCatalogBackfillQueueLoading(false);
+    }
+  }
+
+  async function repairCatalogBackfillQueueStatuses() {
+    if (catalogBackfillQueueRepairLoading) {
+      return;
+    }
+    setCatalogBackfillQueueRepairLoading(true);
+    setCatalogBackfillQueueRepairMessage("");
+    try {
+      const payload = await postCatalogBackfillQueueRepair();
+      setCatalogBackfillQueueRepairMessage(`Repaired ${payload.repaired} queue item status values.`);
+      await loadCatalogBackfillQueue(true);
+    } catch (error) {
+      setCatalogBackfillQueueRepairMessage(formatUiErrorMessage(error, "Failed to repair queue statuses."));
+    } finally {
+      setCatalogBackfillQueueRepairLoading(false);
+    }
+  }
+
+  async function loadAlbumCatalogLookup(reset: boolean = false) {
+    if (albumCatalogLookupLoading) {
+      return;
+    }
+    if (reset) {
+      setAlbumCatalogLookupResult(null);
+      setAlbumCatalogLookupLoaded(false);
+      setAlbumCatalogLookupLastLoadedAt(null);
+    }
+    setAlbumCatalogLookupLoading(true);
+    setAlbumCatalogLookupError("");
+    try {
+      const payload = await fetchAlbumCatalogLookup(
+        albumCatalogLookupQ,
+        albumCatalogLookupStatus,
+        searchLookupQueueStatus,
+        searchLookupSort,
+        50,
+        0,
+      );
+      setAlbumCatalogLookupResult(payload);
+      setAlbumCatalogLookupLoaded(true);
+      setAlbumCatalogLookupLastLoadedAt(Date.now());
+    } catch (error) {
+      setAlbumCatalogLookupError(formatUiErrorMessage(error, "Failed to search albums."));
+    } finally {
+      setAlbumCatalogLookupLoading(false);
+    }
+  }
+
+  async function loadTrackCatalogLookup(reset: boolean = false) {
+    if (trackCatalogLookupLoading) {
+      return;
+    }
+    if (reset) {
+      setTrackCatalogLookupResult(null);
+      setTrackCatalogLookupLoaded(false);
+      setTrackCatalogLookupLastLoadedAt(null);
+    }
+    setTrackCatalogLookupLoading(true);
+    setTrackCatalogLookupError("");
+    try {
+      const payload = await fetchTrackCatalogLookup(
+        albumCatalogLookupQ,
+        trackCatalogLookupStatus,
+        searchLookupQueueStatus,
+        searchLookupSort,
+        50,
+        0,
+      );
+      setTrackCatalogLookupResult(payload);
+      setTrackCatalogLookupLoaded(true);
+      setTrackCatalogLookupLastLoadedAt(Date.now());
+    } catch (error) {
+      setTrackCatalogLookupError(formatUiErrorMessage(error, "Failed to search tracks."));
+    } finally {
+      setTrackCatalogLookupLoading(false);
+    }
+  }
+
+  async function loadAlbumDuplicateLookup(reset: boolean = false) {
+    if (albumDuplicateLookupLoading) {
+      return;
+    }
+    if (reset) {
+      setAlbumDuplicateLookupResult(null);
+      setAlbumDuplicateLookupLoaded(false);
+      setAlbumDuplicateLookupLastLoadedAt(null);
+    }
+    setAlbumDuplicateLookupLoading(true);
+    setAlbumDuplicateLookupError("");
+    try {
+      const payload = await fetchAlbumDuplicateLookup(200, 0);
+      setAlbumDuplicateLookupResult(payload);
+      setAlbumDuplicateLookupLoaded(true);
+      setAlbumDuplicateLookupLastLoadedAt(Date.now());
+    } catch (error) {
+      setAlbumDuplicateLookupError(formatUiErrorMessage(error, "Failed to load duplicate albums."));
+    } finally {
+      setAlbumDuplicateLookupLoading(false);
+    }
+  }
+
+  async function loadTrackDuplicateLookup(reset: boolean = false) {
+    if (trackDuplicateLookupLoading) {
+      return;
+    }
+    if (reset) {
+      setTrackDuplicateLookupResult(null);
+      setTrackDuplicateLookupLoaded(false);
+      setTrackDuplicateLookupLastLoadedAt(null);
+    }
+    setTrackDuplicateLookupLoading(true);
+    setTrackDuplicateLookupError("");
+    try {
+      const payload = await fetchTrackDuplicateLookup(200, 0);
+      setTrackDuplicateLookupResult(payload);
+      setTrackDuplicateLookupLoaded(true);
+      setTrackDuplicateLookupLastLoadedAt(Date.now());
+    } catch (error) {
+      setTrackDuplicateLookupError(formatUiErrorMessage(error, "Failed to load duplicate tracks."));
+    } finally {
+      setTrackDuplicateLookupLoading(false);
+    }
+  }
+
+  async function loadAlbumNameDuplicateLookup(reset: boolean = false) {
+    if (albumNameDuplicateLookupLoading) {
+      return;
+    }
+    if (reset) {
+      setAlbumNameDuplicateLookupResult(null);
+      setAlbumNameDuplicateLookupLoaded(false);
+      setAlbumNameDuplicateLookupLastLoadedAt(null);
+    }
+    setAlbumNameDuplicateLookupLoading(true);
+    setAlbumNameDuplicateLookupError("");
+    try {
+      const payload = await fetchAlbumNameDuplicateLookup(200, 0);
+      setAlbumNameDuplicateLookupResult(payload);
+      setAlbumNameDuplicateLookupLoaded(true);
+      setAlbumNameDuplicateLookupLastLoadedAt(Date.now());
+    } catch (error) {
+      setAlbumNameDuplicateLookupError(formatUiErrorMessage(error, "Failed to load duplicate albums by name."));
+    } finally {
+      setAlbumNameDuplicateLookupLoading(false);
+    }
+  }
+
+  async function loadActiveSearchLookup(reset: boolean = false) {
+    if (searchLookupEntityType === "duplicate_albums") {
+      await loadAlbumDuplicateLookup(reset);
+      return;
+    }
+    if (searchLookupEntityType === "tracks") {
+      await loadTrackCatalogLookup(reset);
+      return;
+    }
+    await loadAlbumCatalogLookup(reset);
+  }
+
+  async function enqueueVisibleIncompleteLookupAlbums(items?: AlbumCatalogLookupItem[]) {
+    if (albumCatalogLookupEnqueueLoading) {
+      return;
+    }
+    const sourceItems = items ?? (albumCatalogLookupResult?.items ?? []);
+    const spotifyAlbumIds = Array.from(
+      new Set(
+        sourceItems
+          .filter((item) => albumLookupRowCanBulkPrioritize(item))
+          .map((item) => item.spotify_album_id)
+          .filter((spotifyAlbumId): spotifyAlbumId is string => Boolean(spotifyAlbumId)),
+      ),
+    );
+    if (spotifyAlbumIds.length === 0) {
+      setAlbumCatalogLookupEnqueueResult(null);
+      setAlbumCatalogLookupEnqueueError("No visible incomplete albums with Spotify IDs to enqueue.");
+      return;
+    }
+
+    setAlbumCatalogLookupEnqueueLoading(true);
+    setAlbumCatalogLookupEnqueueError("");
+    setAlbumCatalogLookupEnqueueResult(null);
+    try {
+      const payload = await enqueueCatalogBackfillItems(
+        spotifyAlbumIds.map((spotifyId) => ({
+          entity_type: "album",
+          spotify_id: spotifyId,
+          reason: "album_lookup_visible_incomplete",
+          priority: 80,
+        })),
+      );
+      setAlbumCatalogLookupEnqueueResult(payload);
+      await loadCatalogBackfillQueue(true);
+    } catch (error) {
+      setAlbumCatalogLookupEnqueueError(formatUiErrorMessage(error, "Failed to enqueue albums."));
+    } finally {
+      setAlbumCatalogLookupEnqueueLoading(false);
+    }
+  }
+
+  async function enqueueVisibleIncompleteLookupTracks(items?: TrackCatalogLookupItem[]) {
+    if (albumCatalogLookupEnqueueLoading) {
+      return;
+    }
+    const sourceItems = items ?? (trackCatalogLookupResult?.items ?? []);
+    const spotifyTrackIds = Array.from(
+      new Set(
+        sourceItems
+          .filter((item) => trackLookupRowCanBulkPrioritize(item))
+          .map((item) => item.spotify_track_id)
+          .filter((spotifyTrackId): spotifyTrackId is string => Boolean(spotifyTrackId)),
+      ),
+    );
+    if (spotifyTrackIds.length === 0) {
+      setAlbumCatalogLookupEnqueueResult(null);
+      setAlbumCatalogLookupEnqueueError("No visible incomplete tracks with Spotify IDs to prioritize.");
+      return;
+    }
+
+    setAlbumCatalogLookupEnqueueLoading(true);
+    setAlbumCatalogLookupEnqueueError("");
+    setAlbumCatalogLookupEnqueueResult(null);
+    try {
+      const payload = await enqueueCatalogBackfillItems(
+        spotifyTrackIds.map((spotifyId) => ({
+          entity_type: "track",
+          spotify_id: spotifyId,
+          reason: "track_lookup_visible_incomplete",
+          priority: 80,
+        })),
+      );
+      setAlbumCatalogLookupEnqueueResult(payload);
+      await loadCatalogBackfillQueue(true);
+    } catch (error) {
+      setAlbumCatalogLookupEnqueueError(formatUiErrorMessage(error, "Failed to prioritize tracks."));
+    } finally {
+      setAlbumCatalogLookupEnqueueLoading(false);
+    }
+  }
+
+  async function runCatalogBackfill() {
+    if (catalogBackfillRunLoading) {
+      return;
+    }
+    setCatalogBackfillRunLoading(true);
+    setCatalogBackfillRunError("");
+    try {
+      const result = await postCatalogBackfillRun();
+      setCatalogBackfillLatestResult(result);
+      await Promise.all([loadCatalogBackfillCoverage(true), loadCatalogBackfillRuns(true), loadCatalogBackfillQueue(true)]);
+    } catch (error) {
+      setCatalogBackfillRunError(formatUiErrorMessage(error, "Catalog backfill failed."));
+    } finally {
+      setCatalogBackfillRunLoading(false);
     }
   }
 
@@ -5362,6 +10118,7 @@ export function App() {
                     className="bar-trigger bar-trigger-brand"
                     onClick={() => {
                       setBrandMenuOpen((current) => !current);
+                      setExperimentalMenuOpen(false);
                       setProfileMenuOpen(false);
                       setRateLimitMenuOpen(false);
                     }}
@@ -5400,6 +10157,7 @@ export function App() {
                       onClick={() => {
                         setRateLimitMenuOpen((current) => !current);
                         setBrandMenuOpen(false);
+                        setExperimentalMenuOpen(false);
                         setPlayerMenuOpen(false);
                         setProfileMenuOpen(false);
                       }}
@@ -5446,6 +10204,50 @@ export function App() {
               </div>
 
               <div className="sticky-bar-center">
+                <div className="profile-menu-shell profile-menu-shell-inline experimental-menu-shell" ref={experimentalMenuRef}>
+                  <button
+                    aria-expanded={experimentalMenuOpen}
+                    aria-label="Experimental tools"
+                    className="jump-link jump-link-icon"
+                    onClick={() => {
+                      setExperimentalMenuOpen((current) => !current);
+                      setBrandMenuOpen(false);
+                      setPlayerMenuOpen(false);
+                      setProfileMenuOpen(false);
+                      setRateLimitMenuOpen(false);
+                    }}
+                    type="button"
+                  >
+                    {"🧪"}
+                  </button>
+                  {experimentalMenuOpen ? (
+                    <section className="profile-card top-profile-card profile-menu-card experimental-menu-card">
+                      <div className="profile-panel-top">
+                        <div>
+                          <h2>Experimental</h2>
+                          <p className="empty-copy">Tools for inspecting the ranking and identity work in progress.</p>
+                        </div>
+                      </div>
+                      <div className="experimental-menu-actions">
+                        <button className="secondary-button" onClick={openListeningLogPage} type="button">
+                          Listen Log
+                        </button>
+                        <button className="secondary-button" onClick={openFormulaLabPage} type="button">
+                          Formula Lab
+                        </button>
+                        <button className="secondary-button" onClick={openIdentityAuditPage} type="button">
+                          Identity Audit
+                        </button>
+                        <button className="secondary-button" onClick={openCatalogBackfillPage} type="button">
+                          Catalog Backfill
+                        </button>
+                        <button className="secondary-button" onClick={openSearchLookupPage} type="button">
+                          Search / Lookup
+                        </button>
+                      </div>
+                    </section>
+                  ) : null}
+                </div>
                 {experienceMode === "full" ? (
                   <button className="jump-link" onClick={() => openAndScrollToSection("recent", "activity")} type="button">
                     Activity
@@ -5479,6 +10281,7 @@ export function App() {
                       setPlayerMenuOpen((current) => !current);
                       setProfileMenuOpen(false);
                       setBrandMenuOpen(false);
+                      setExperimentalMenuOpen(false);
                       setRateLimitMenuOpen(false);
                     }}
                     type="button"
@@ -5621,6 +10424,7 @@ export function App() {
                     onClick={() => {
                       setProfileMenuOpen((current) => !current);
                       setBrandMenuOpen(false);
+                      setExperimentalMenuOpen(false);
                       setPlayerMenuOpen(false);
                       setRateLimitMenuOpen(false);
                     }}
@@ -5733,13 +10537,25 @@ export function App() {
                 </div>
               </div>
             </nav>
-            {appPage === "tracksOnly" ? (
+            {appPage === "formulaLab" ? (
               <div className="dashboard-grid">
-                {renderTracksOnlyPage()}
+                {renderFormulaLabPage()}
+              </div>
+            ) : appPage === "identityAudit" ? (
+              <div className="dashboard-grid">
+                {renderIdentityAuditPage()}
               </div>
             ) : appPage === "recentDebug" ? (
               <div className="dashboard-grid">
                 {renderRecentDebugPage()}
+              </div>
+            ) : appPage === "catalogBackfill" ? (
+              <div className="dashboard-grid">
+                {renderCatalogBackfillPage()}
+              </div>
+            ) : appPage === "searchLookup" ? (
+              <div className="dashboard-grid">
+                {renderSearchLookupPage()}
               </div>
             ) : (
             <div className="dashboard-grid">
@@ -5750,26 +10566,6 @@ export function App() {
                 leftTitle: (
                   <div className="section-column-header">
                     <h3>Recently played</h3>
-                    <div className="section-column-header-actions">
-                      <button
-                        className="secondary-button tracks-page-link-button"
-                        onClick={() => {
-                          setListeningLogTracks([]);
-                          setListeningLogHasMore(false);
-                          setListeningLogOffset(0);
-                          setListeningLogLoaded(false);
-                          setListeningLogLoading(false);
-                          setListeningLogError("");
-                          setListeningLogLastLoadedAt(null);
-                          setOpenDebugSessions({});
-                          setOpenDebugTracks({});
-                          setAppPage("recentDebug");
-                        }}
-                        type="button"
-                      >
-                        Open listening log
-                      </button>
-                    </div>
                   </div>
                 ),
                 rightTitle: renderSectionTitle("Recently liked", "recent_likes"),
@@ -5825,13 +10621,6 @@ export function App() {
                     <h3>All time</h3>
                     <div className="section-column-header-actions">
                       {renderTrackRankingToggle()}
-                      <button
-                        className="secondary-button tracks-page-link-button"
-                        onClick={() => setAppPage("tracksOnly")}
-                        type="button"
-                      >
-                        Open tracks page
-                      </button>
                     </div>
                   </div>
                 ),
@@ -6107,9 +10896,9 @@ export function App() {
                 ) : null}
               </div>
             </div>
-            {selectedPreview.kind === "track" ? (
+            {selectedPreview.kind === "track" || selectedPreview.kind === "album" ? (
               <div className="detail-modal-album-tracks detail-modal-album-tracks-full">
-                {selectedPreviewCanOpenAlbum ? (
+                {selectedPreview.kind === "track" && selectedPreviewCanOpenAlbum ? (
                   <button
                     className="detail-modal-inline-link detail-modal-album-title"
                     onClick={openSelectedTrackAlbumPreview}
@@ -6118,7 +10907,9 @@ export function App() {
                     {previewAlbumHeading(selectedPreview)}
                   </button>
                 ) : (
-                  <p className="detail-modal-album-title">{previewAlbumHeading(selectedPreview)}</p>
+                  <p className="detail-modal-album-title">
+                    {selectedPreview.kind === "album" ? selectedPreview.label : previewAlbumHeading(selectedPreview)}
+                  </p>
                 )}
                 <div className="detail-modal-album-header" aria-hidden="true">
                   <span className="detail-modal-album-preview-header">Preview</span>

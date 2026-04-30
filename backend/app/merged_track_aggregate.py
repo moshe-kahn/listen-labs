@@ -85,18 +85,17 @@ def get_merged_track_aggregate(
         .replace("+00:00", "Z")
     )
 
-    where_clause = ""
+    source_filter_clause = ""
     if normalized_source_filter == "recent":
-        where_clause = "WHERE agg.recent_source_event_count > 0 AND agg.history_source_event_count = 0"
+        source_filter_clause = "AND agg.recent_source_event_count > 0 AND agg.history_source_event_count = 0"
     elif normalized_source_filter == "history":
-        where_clause = "WHERE agg.history_source_event_count > 0 AND agg.recent_source_event_count = 0"
+        source_filter_clause = "AND agg.history_source_event_count > 0 AND agg.recent_source_event_count = 0"
     elif normalized_source_filter == "both":
-        where_clause = "WHERE agg.history_source_event_count > 0 AND agg.recent_source_event_count > 0"
+        source_filter_clause = "AND agg.history_source_event_count > 0 AND agg.recent_source_event_count > 0"
 
     with sqlite_connection() as connection:
         connection.row_factory = None
-        rows = connection.execute(
-            f"""
+        base_cte = """
             WITH normalized AS (
               SELECT
                 id,
@@ -128,6 +127,15 @@ def get_merged_track_aggregate(
               FROM v_fact_play_event_with_sources
               WHERE canonical_ended_at IS NOT NULL
             ),
+            ranked AS (
+              SELECT
+                normalized.*,
+                ROW_NUMBER() OVER (
+                  PARTITION BY track_identity
+                  ORDER BY played_at DESC, id DESC
+                ) AS latest_rank
+              FROM normalized
+            ),
             agg AS (
               SELECT
                 track_identity,
@@ -143,51 +151,32 @@ def get_merged_track_aggregate(
               FROM normalized
               GROUP BY track_identity
             )
+        """
+        excluded_unknown_identity_count = int(
+            connection.execute(
+                f"""
+                {base_cte}
+                SELECT COALESCE(SUM(agg.total_play_count), 0)
+                FROM agg
+                WHERE agg.is_unknown_identity > 0
+                {source_filter_clause}
+                """,
+                (recent_cutoff_iso,),
+            ).fetchone()[0]
+            or 0
+        )
+        rows = connection.execute(
+            f"""
+            {base_cte}
             SELECT
               agg.track_identity,
               agg.is_unknown_identity,
-              (
-                SELECT n.spotify_track_id
-                FROM normalized n
-                WHERE n.track_identity = agg.track_identity
-                ORDER BY n.played_at DESC, n.id DESC
-                LIMIT 1
-              ) AS spotify_track_id,
-              (
-                SELECT n.spotify_track_uri
-                FROM normalized n
-                WHERE n.track_identity = agg.track_identity
-                ORDER BY n.played_at DESC, n.id DESC
-                LIMIT 1
-              ) AS spotify_track_uri,
-              (
-                SELECT n.spotify_album_id
-                FROM normalized n
-                WHERE n.track_identity = agg.track_identity
-                ORDER BY n.played_at DESC, n.id DESC
-                LIMIT 1
-              ) AS spotify_album_id,
-              (
-                SELECT n.track_name_raw
-                FROM normalized n
-                WHERE n.track_identity = agg.track_identity
-                ORDER BY n.played_at DESC, n.id DESC
-                LIMIT 1
-              ) AS track_name_raw,
-              (
-                SELECT n.artist_name_raw
-                FROM normalized n
-                WHERE n.track_identity = agg.track_identity
-                ORDER BY n.played_at DESC, n.id DESC
-                LIMIT 1
-              ) AS artist_name_raw,
-              (
-                SELECT n.album_name_raw
-                FROM normalized n
-                WHERE n.track_identity = agg.track_identity
-                ORDER BY n.played_at DESC, n.id DESC
-                LIMIT 1
-              ) AS album_name_raw,
+              latest.spotify_track_id,
+              latest.spotify_track_uri,
+              latest.spotify_album_id,
+              latest.track_name_raw,
+              latest.artist_name_raw,
+              latest.album_name_raw,
               agg.total_play_count,
               agg.recent_play_count,
               agg.first_played_at,
@@ -197,25 +186,22 @@ def get_merged_track_aggregate(
               agg.history_source_event_count,
               agg.matched_source_event_count
             FROM agg
-            {where_clause}
+            JOIN ranked latest
+              ON latest.track_identity = agg.track_identity
+             AND latest.latest_rank = 1
+            WHERE agg.is_unknown_identity = 0
+            {source_filter_clause}
             ORDER BY
               agg.total_play_count DESC,
               agg.last_played_at DESC,
               agg.track_identity ASC
+            LIMIT ?
             """,
-            (recent_cutoff_iso,),
+            (recent_cutoff_iso, bounded_limit),
         ).fetchall()
 
-    all_rows = []
-    excluded_unknown_identity_count = 0
-    for row in rows:
-        if int(row[1] or 0) > 0:
-            excluded_unknown_identity_count += int(row[8] or 0)
-            continue
-        all_rows.append(row)
-
     items: list[MergedTrackAggregateItem] = []
-    for row in all_rows[:bounded_limit]:
+    for row in rows:
         (
             track_identity,
             _is_unknown_identity,

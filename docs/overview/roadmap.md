@@ -1,7 +1,7 @@
 # ListenLab Roadmap
 
 ## Purpose
-This roadmap translates the product brief into buildable engineering milestones. It is intentionally implementation-oriented and should be used alongside `docs/architecture.md` and `docs/context.md`.
+This roadmap translates the product brief into buildable engineering milestones. It is intentionally implementation-oriented and should be used alongside `docs/overview/architecture.md` and `docs/overview/context.md`.
 
 ## Planning Defaults
 - The repository now has a working authenticated dashboard foundation.

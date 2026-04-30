@@ -7,6 +7,7 @@ import unittest
 from contextlib import closing
 
 from backend.app.db import (
+    _normalize_fallback_artist_text,
     apply_pending_migrations,
     backfill_local_text_entities,
     backfill_spotify_source_entities,
@@ -95,7 +96,7 @@ class EntityBackfillTests(unittest.TestCase):
 
         result = backfill_spotify_source_entities()
 
-        self.assertEqual(2, result["rows_scanned"])
+        self.assertEqual(1, result["rows_scanned"])
         self.assertEqual(2, result["artists_created"])
         self.assertEqual(2, result["source_artists_created"])
         self.assertEqual(1, result["release_albums_created"])
@@ -259,6 +260,128 @@ class EntityBackfillTests(unittest.TestCase):
         self.assertEqual("History Artist", history_album_artist[2])
         self.assertEqual("history_raw_text", history_album_artist[3])
         self.assertEqual("artist_name_raw", history_album_artist[5])
+
+    def test_normalize_fallback_artist_text_dedupes_comma_artist(self) -> None:
+        self.assertEqual("Telekinesis", _normalize_fallback_artist_text("Telekinesis, Telekinesis"))
+        self.assertEqual("Telekinesis", _normalize_fallback_artist_text(" Telekinesis ,  Telekinesis "))
+
+    def test_normalize_fallback_artist_text_uses_first_primary_artist(self) -> None:
+        self.assertEqual("Brian Eno", _normalize_fallback_artist_text("Brian Eno, David Byrne"))
+        self.assertEqual("", _normalize_fallback_artist_text(""))
+        self.assertEqual("", _normalize_fallback_artist_text(None))
+
+    def test_local_text_backfill_fallback_stable_key_uses_normalized_artist(self) -> None:
+        base_payload = {
+            "master_metadata_track_name": "History Song Key",
+            "master_metadata_album_album_name": "History Album Key",
+        }
+        insert_raw_play_event(
+            source_type="spotify_history",
+            source_row_key="history-key-row-1",
+            played_at="2026-04-18T12:00:00Z",
+            ms_played=100000,
+            ms_played_method="history_source",
+            raw_payload_json=json.dumps(
+                {**base_payload, "master_metadata_album_artist_name": "Telekinesis"},
+                sort_keys=True,
+            ),
+            spotify_track_uri=None,
+            spotify_track_id=None,
+            track_name_raw="History Song Key",
+            artist_name_raw="Telekinesis",
+            album_name_raw="History Album Key",
+            spotify_album_id=None,
+            spotify_artist_ids_json=None,
+        )
+        insert_raw_play_event(
+            source_type="spotify_history",
+            source_row_key="history-key-row-2",
+            played_at="2026-04-18T13:00:00Z",
+            ms_played=101000,
+            ms_played_method="history_source",
+            raw_payload_json=json.dumps(
+                {**base_payload, "master_metadata_album_artist_name": "Telekinesis, Telekinesis"},
+                sort_keys=True,
+            ),
+            spotify_track_uri=None,
+            spotify_track_id=None,
+            track_name_raw="History Song Key",
+            artist_name_raw="Telekinesis, Telekinesis",
+            album_name_raw="History Album Key",
+            spotify_album_id=None,
+            spotify_artist_ids_json=None,
+        )
+
+        local = backfill_local_text_entities()
+        self.assertEqual(1, local["release_tracks_created"])
+
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            source_track_count = int(
+                connection.execute("SELECT count(*) FROM source_track WHERE source_name = 'history_raw'").fetchone()[0]
+            )
+            source_artist_labels = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT source_name_raw FROM source_artist WHERE source_name = 'history_raw' ORDER BY id ASC"
+                ).fetchall()
+            ]
+            track_artist_credits = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT credited_as FROM track_artist ORDER BY id ASC"
+                ).fetchall()
+            ]
+            raw_artist_values = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT artist_name_raw FROM raw_play_event ORDER BY id ASC"
+                ).fetchall()
+            ]
+        self.assertEqual(1, source_track_count)
+        self.assertIn("Telekinesis", source_artist_labels)
+        self.assertEqual(1, len(source_artist_labels))
+        self.assertIn("Telekinesis", track_artist_credits)
+        self.assertIn("Telekinesis, Telekinesis", raw_artist_values)
+
+    def test_spotify_id_path_behavior_unchanged_with_duplicate_artist_text(self) -> None:
+        payload = {
+            "item": {
+                "id": "track-sp-1",
+                "name": "Song SP",
+                "uri": "spotify:track:track-sp-1",
+                "artists": [{"id": "artist-sp-1", "name": "Telekinesis"}],
+                "album": {"id": "album-sp-1", "name": "Album SP", "uri": "spotify:album:album-sp-1"},
+            }
+        }
+        insert_raw_play_event(
+            source_type="spotify_recent",
+            source_row_key="spotify-row-1",
+            played_at="2026-04-18T12:00:00Z",
+            ms_played=120000,
+            ms_played_method="history_source",
+            raw_payload_json=json.dumps(payload, sort_keys=True),
+            spotify_track_uri="spotify:track:track-sp-1",
+            spotify_track_id="track-sp-1",
+            track_name_raw="Song SP",
+            artist_name_raw="Telekinesis, Telekinesis",
+            album_name_raw="Album SP",
+            spotify_album_id="album-sp-1",
+            spotify_artist_ids_json=json.dumps(["artist-sp-1"]),
+            track_duration_ms=180000,
+        )
+
+        exact = backfill_spotify_source_entities()
+        self.assertEqual(1, exact["release_tracks_created"])
+        self.assertEqual(1, exact["artists_created"])
+
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            artist_names = [
+                row[0]
+                for row in connection.execute("SELECT canonical_name FROM artist ORDER BY id ASC").fetchall()
+            ]
+            analysis_track_map_count = int(connection.execute("SELECT count(*) FROM analysis_track_map").fetchone()[0])
+        self.assertEqual(["Telekinesis"], artist_names)
+        self.assertEqual(0, analysis_track_map_count)
 
     def test_exact_spotify_backfill_reuses_release_track_created_from_matching_spotify_uri(self) -> None:
         insert_raw_play_event(

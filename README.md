@@ -66,13 +66,22 @@ ListenLab is built around **"signal over suggestion"**:
 
 ## Docs
 
-- [Architecture](docs/architecture.md)
-- [Context](docs/context.md)
-- [Roadmap](docs/roadmap.md)
-- [Raw Ingest](docs/raw-ingest.md)
-- [Formula Calibration](docs/formula-calibration.md)
-- [Auth Milestone Notes](docs/auth-milestone.md)
-- [Track Section Migration](docs/track-section-migration.md)
+- [Current Handoff](docs/current-handoff.md)
+- [Architecture](docs/overview/architecture.md)
+- [Context](docs/overview/context.md)
+- [Roadmap](docs/overview/roadmap.md)
+- [Raw Ingest](docs/reference/raw-ingest.md)
+- [Entity Model Draft](docs/reference/drafts/entity-model-draft.md)
+- [Spotify Catalog Backfill](docs/reference/spotify-catalog-backfill.md)
+- [Formula Calibration](docs/reference/formula-calibration.md)
+- [Auth Milestone Notes](docs/reference/archive/auth-milestone.md)
+- [Track Section Migration](docs/reference/track-section-migration.md)
+- [Identity Audit Submission Contract (Draft)](docs/reference/drafts/identity-audit-submission-contract.md)
+
+## Runtime Requirements
+
+- Python `3.11+` for backend development and tests.
+- Node.js `18+` for frontend development.
 
 ---
 
@@ -84,7 +93,6 @@ Build toward a web app that:
 - persists raw play events from both Spotify recent-play API data and Spotify extended streaming history
 - upgrades weaker raw duration estimates when better source data arrives later
 - calibrates scoring heuristics against exported listening history when available
-- remains usable in a local cached mode when Spotify is unavailable or rate-limited
 - eventually ranks overlooked artists by actual engagement
 - explains why each result was surfaced
 - optionally creates a playlist from those artists

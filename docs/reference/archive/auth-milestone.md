@@ -29,6 +29,8 @@
 - Uses `127.0.0.1` consistently for backend, frontend, and Spotify redirect configuration
 
 ## Backend setup
+Python version: use Python `3.11+`.
+
 1. Copy `backend/.env.example` to `backend/.env`.
 2. Fill in Spotify app credentials.
 3. Install dependencies:

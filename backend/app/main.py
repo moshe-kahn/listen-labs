@@ -13,9 +13,9 @@ from typing import Any, Callable
 from urllib.parse import urlencode
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import Body, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
 
 from backend.app.config import get_settings
@@ -40,12 +40,41 @@ from backend.app.spotify_recent_api import fetch_spotify_recent_play_page
 from backend.app.spotify_current_playback import get_current_playback_for_user
 from backend.app.spotify_recent_polling import poll_recent_for_user
 from backend.app.spotify_recent_sync import sync_spotify_recent_plays
+from backend.app.spotify_catalog_backfill import (
+    discover_known_spotify_track_id,
+    discover_known_spotify_track_ids,
+    dry_run_release_album_merge,
+    enqueue_spotify_catalog_backfill_items,
+    get_spotify_catalog_backfill_coverage,
+    list_spotify_catalog_backfill_queue,
+    list_spotify_catalog_backfill_runs,
+    preview_release_album_merge,
+    repair_spotify_catalog_backfill_queue_statuses,
+    run_spotify_catalog_backfill,
+    search_album_catalog_duplicate_by_name_identities,
+    search_album_catalog_duplicate_spotify_identities,
+    search_album_catalog_lookup,
+    search_track_catalog_duplicate_spotify_identities,
+    search_track_catalog_lookup,
+)
 from backend.app.spotify_token_store import (
     SpotifyTokenStoreError,
     get_spotify_tokens,
     refresh_access_token_if_needed,
     upsert_spotify_tokens,
     validate_token_encryption_key,
+)
+from backend.app.track_identity_audit import (
+    build_track_identity_audit,
+    query_ambiguous_review_queue,
+    query_suggested_analysis_groups,
+)
+from backend.app.track_identity_audit_submission import (
+    dry_run_identity_audit_submission,
+    get_identity_audit_submission,
+    list_identity_audit_submissions,
+    save_identity_audit_submission,
+    validate_identity_audit_submission_preview,
 )
 
 settings = get_settings()
@@ -4098,6 +4127,55 @@ async def debug_me_recent_compare(
     }
 
 
+def _merged_track_aggregate_payload(
+    *,
+    limit: int,
+    recent_window_days: int,
+    source_filter: str,
+) -> dict[str, Any]:
+    normalized_source_filter = source_filter if source_filter in {"all", "recent", "history", "both"} else "all"
+    bounded_limit = max(1, min(int(limit), 500))
+    bounded_recent_window_days = max(0, int(recent_window_days))
+    result = get_merged_track_aggregate(
+        limit=bounded_limit,
+        recent_window_days=bounded_recent_window_days,
+        source_filter=normalized_source_filter,
+    )
+    return {
+        "limit": bounded_limit,
+        "recent_window_days": bounded_recent_window_days,
+        "source_filter": normalized_source_filter,
+        "returned_items": len(result["items"]),
+        "excluded_unknown_identity_count": result["excluded_unknown_identity_count"],
+        "items": result["items"],
+    }
+
+
+def _require_local_data_session(request: Request) -> str:
+    user_id = _session_user_id(request) or _restore_session_user_from_token_store(request)
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated with Spotify.",
+        )
+    return user_id
+
+
+@app.get("/tracks/merged-aggregate")
+async def tracks_merged_aggregate(
+    request: Request,
+    limit: int = 200,
+    recent_window_days: int = 28,
+    source_filter: str = "all",
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    return _merged_track_aggregate_payload(
+        limit=limit,
+        recent_window_days=recent_window_days,
+        source_filter=source_filter,
+    )
+
+
 @app.get("/debug/tracks/merged-aggregate")
 async def debug_tracks_merged_aggregate(
     request: Request,
@@ -4105,19 +4183,555 @@ async def debug_tracks_merged_aggregate(
     recent_window_days: int = 28,
     source_filter: str = "all",
 ) -> dict[str, Any]:
-    _require_token(request)
-    result = get_merged_track_aggregate(
-        limit=max(1, min(int(limit), 500)),
-        recent_window_days=max(0, int(recent_window_days)),
-        source_filter=source_filter if source_filter in {"all", "recent", "history", "both"} else "all",
+    _require_local_data_session(request)
+    return _merged_track_aggregate_payload(
+        limit=limit,
+        recent_window_days=recent_window_days,
+        source_filter=source_filter,
+    )
+
+
+@app.get("/debug/tracks/identity-audit")
+async def debug_tracks_identity_audit(
+    request: Request,
+    limit: int = 5,
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    return build_track_identity_audit(limit=limit)
+
+
+@app.get("/debug/tracks/identity-audit/ambiguous-review")
+async def debug_tracks_identity_audit_ambiguous_review(
+    request: Request,
+    limit: int = 200,
+    offset: int = 0,
+    family: str | None = None,
+    bucket: str | None = None,
+    log_path: str | None = None,
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    return query_ambiguous_review_queue(
+        log_path=log_path,
+        limit=limit,
+        offset=offset,
+        family=family,
+        bucket=bucket,
+    )
+
+
+@app.get("/debug/tracks/identity-audit/suggested-groups")
+async def debug_tracks_identity_audit_suggested_groups(
+    request: Request,
+    limit: int = 50,
+    offset: int = 0,
+    status_filter: str = "suggested",
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    return query_suggested_analysis_groups(
+        limit=limit,
+        offset=offset,
+        status=status_filter,
+    )
+
+
+@app.post("/debug/tracks/identity-audit/submission-preview/validate")
+async def debug_tracks_identity_audit_submission_preview_validate(
+    request: Request,
+    payload: Any = Body(...),
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Payload must be a JSON object.",
+    )
+    return validate_identity_audit_submission_preview(payload)
+
+
+@app.post("/debug/tracks/identity-audit/submissions")
+async def debug_tracks_identity_audit_submissions_create(
+    request: Request,
+    payload: Any = Body(...),
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Payload must be a JSON object.",
+    )
+    return save_identity_audit_submission(payload)
+
+
+@app.get("/debug/tracks/identity-audit/submissions")
+async def debug_tracks_identity_audit_submissions_list(
+    request: Request,
+    limit: int = 20,
+    offset: int = 0,
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    return list_identity_audit_submissions(limit=limit, offset=offset)
+
+
+@app.get("/debug/tracks/identity-audit/submissions/{submission_id}")
+async def debug_tracks_identity_audit_submissions_read(
+    request: Request,
+    submission_id: int,
+) -> Any:
+    _require_local_data_session(request)
+    payload = get_identity_audit_submission(submission_id)
+    if payload is None:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={
+                "ok": False,
+                "error": {
+                    "code": "submission_not_found",
+                    "message": f"Submission {submission_id} was not found.",
+                },
+            },
+        )
+    return payload
+
+
+@app.post("/debug/tracks/identity-audit/submissions/{submission_id}/dry-run")
+async def debug_tracks_identity_audit_submissions_dry_run(
+    request: Request,
+    submission_id: int,
+) -> Any:
+    _require_local_data_session(request)
+    payload = dry_run_identity_audit_submission(submission_id)
+    if payload is None:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={
+                "ok": False,
+                "error": {
+                    "code": "submission_not_found",
+                    "message": f"Submission {submission_id} was not found.",
+                },
+            },
+        )
+    return payload
+
+
+@app.post("/debug/spotify/catalog-backfill")
+async def debug_spotify_catalog_backfill(
+    request: Request,
+    payload: Any = Body(None),
+) -> Any:
+    try:
+        user_id = _require_local_data_session(request)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_401_UNAUTHORIZED:
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={
+                    "ok": False,
+                    "status": "unauthenticated",
+                    "error": {
+                        "code": "spotify_not_authenticated",
+                        "message": "Not authenticated with Spotify.",
+                    },
+                },
+            )
+        raise
+    body = payload if isinstance(payload, dict) else {}
+
+    limit = int(body.get("limit", 200))
+    offset = int(body.get("offset", 0))
+    market = str(body.get("market", "US") or "US")
+    include_albums = bool(body.get("include_albums", True))
+    force_refresh = bool(body.get("force_refresh", False))
+    request_delay_seconds = float(body.get("request_delay_seconds", 0.35))
+    max_runtime_seconds = float(body.get("max_runtime_seconds", 60))
+    max_requests = int(body.get("max_requests", 150))
+    max_errors = int(body.get("max_errors", 10))
+    max_album_tracks_pages_per_album = int(body.get("max_album_tracks_pages_per_album", 10))
+    max_429 = int(body.get("max_429", 3))
+    album_tracklist_policy = str(body.get("album_tracklist_policy", "all") or "all")
+
+    try:
+        token_row = refresh_access_token_if_needed(user_id)
+    except SpotifyTokenStoreError as exc:
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={
+                "ok": False,
+                "status": "unauthenticated",
+                "error": {
+                    "code": "spotify_not_authenticated",
+                    "message": "Not authenticated with Spotify.",
+                },
+            },
+        )
+    access_token = str(token_row.get("access_token") or "")
+    if not access_token:
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={
+                "ok": False,
+                "status": "unauthenticated",
+                "error": {
+                    "code": "spotify_not_authenticated",
+                    "message": "Not authenticated with Spotify.",
+                },
+            },
+        )
+
+    result = run_spotify_catalog_backfill(
+        access_token=access_token,
+        limit=limit,
+        offset=offset,
+        market=market,
+        include_albums=include_albums,
+        force_refresh=force_refresh,
+        request_delay_seconds=request_delay_seconds,
+        max_runtime_seconds=max_runtime_seconds,
+        max_requests=max_requests,
+        max_errors=max_errors,
+        max_album_tracks_pages_per_album=max_album_tracks_pages_per_album,
+        max_429=max_429,
+        album_tracklist_policy=album_tracklist_policy,
+    )
+    if result.get("status") == "failed" and "status 401" in str(result.get("last_error") or ""):
+        try:
+            token_row = refresh_access_token_if_needed(user_id, force_refresh=True)
+            access_token = str(token_row.get("access_token") or "")
+        except SpotifyTokenStoreError as exc:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+        if not access_token:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Spotify access token is unavailable.")
+        result = run_spotify_catalog_backfill(
+            access_token=access_token,
+            limit=limit,
+            offset=offset,
+            market=market,
+            include_albums=include_albums,
+            force_refresh=force_refresh,
+            request_delay_seconds=request_delay_seconds,
+            max_runtime_seconds=max_runtime_seconds,
+            max_requests=max_requests,
+            max_errors=max_errors,
+            max_album_tracks_pages_per_album=max_album_tracks_pages_per_album,
+            max_429=max_429,
+            album_tracklist_policy=album_tracklist_policy,
+        )
+    return {"ok": result.get("status") == "ok", **result}
+
+
+@app.get("/debug/spotify/catalog-backfill/runs")
+async def debug_spotify_catalog_backfill_runs(
+    request: Request,
+    limit: int = 20,
+    offset: int = 0,
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    return list_spotify_catalog_backfill_runs(limit=limit, offset=offset)
+
+
+@app.get("/debug/spotify/catalog-backfill/coverage")
+async def debug_spotify_catalog_backfill_coverage(
+    request: Request,
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    return get_spotify_catalog_backfill_coverage()
+
+
+@app.post("/debug/spotify/catalog-backfill/enqueue")
+async def debug_spotify_catalog_backfill_enqueue(
+    request: Request,
+    payload: Any = Body(None),
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    body = payload if isinstance(payload, dict) else {}
+    items = body.get("items")
+    return enqueue_spotify_catalog_backfill_items(items=items if isinstance(items, list) else [])
+
+
+@app.get("/debug/spotify/catalog-backfill/queue")
+async def debug_spotify_catalog_backfill_queue(
+    request: Request,
+    status: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    return list_spotify_catalog_backfill_queue(status_filter=status, limit=limit, offset=offset)
+
+
+@app.post("/debug/spotify/catalog-backfill/queue/repair")
+async def debug_spotify_catalog_backfill_queue_repair(
+    request: Request,
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    return repair_spotify_catalog_backfill_queue_statuses()
+
+
+@app.get("/debug/search/albums")
+async def debug_search_albums(
+    request: Request,
+    q: str | None = None,
+    catalog_status: str = "all",
+    queue_status: str | None = "all",
+    sort: str | None = "default",
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    return search_album_catalog_lookup(
+        q=q,
+        catalog_status=catalog_status,
+        queue_status=queue_status,
+        sort=sort,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.get("/debug/search/albums/duplicates")
+async def debug_search_album_duplicates(
+    request: Request,
+    limit: int = 200,
+    offset: int = 0,
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    return search_album_catalog_duplicate_spotify_identities(limit=limit, offset=offset)
+
+
+@app.get("/debug/search/albums/duplicates-by-name")
+async def debug_search_album_duplicates_by_name(
+    request: Request,
+    limit: int = 200,
+    offset: int = 0,
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    return search_album_catalog_duplicate_by_name_identities(limit=limit, offset=offset)
+
+
+@app.get("/debug/search/tracks")
+async def debug_search_tracks(
+    request: Request,
+    q: str | None = None,
+    catalog_status: str = "all",
+    queue_status: str | None = "all",
+    sort: str | None = "default",
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    return search_track_catalog_lookup(
+        q=q,
+        catalog_status=catalog_status,
+        queue_status=queue_status,
+        sort=sort,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.get("/debug/search/tracks/duplicates")
+async def debug_search_track_duplicates(
+    request: Request,
+    limit: int = 200,
+    offset: int = 0,
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    return search_track_catalog_duplicate_spotify_identities(limit=limit, offset=offset)
+
+
+@app.post("/debug/identity/release-albums/merge-preview")
+async def debug_identity_release_album_merge_preview(
+    request: Request,
+    body: dict[str, Any] = Body(...),
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    release_album_ids = body.get("release_album_ids")
+    if not isinstance(release_album_ids, list):
+        raise HTTPException(status_code=400, detail="release_album_ids must be a list.")
+    return preview_release_album_merge(release_album_ids)
+
+
+@app.post("/debug/identity/release-albums/merge-dry-run")
+async def debug_identity_release_album_merge_dry_run(
+    request: Request,
+    body: dict[str, Any] = Body(...),
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    release_album_ids = body.get("release_album_ids")
+    if not isinstance(release_album_ids, list):
+        raise HTTPException(status_code=400, detail="release_album_ids must be a list.")
+    survivor_release_album_id = body.get("survivor_release_album_id")
+    if survivor_release_album_id is None:
+        raise HTTPException(status_code=400, detail="survivor_release_album_id is required.")
+    try:
+        survivor_id = int(survivor_release_album_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="survivor_release_album_id must be an integer.")
+    return dry_run_release_album_merge(release_album_ids, survivor_release_album_id=survivor_id)
+
+
+def _spotify_unauthenticated_response() -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        content={
+            "ok": False,
+            "status": "unauthenticated",
+            "error": {
+                "code": "spotify_not_authenticated",
+                "message": "Not authenticated with Spotify.",
+            },
+        },
+    )
+
+
+def _spotify_catalog_probe_track_request(
+    *,
+    access_token: str,
+    spotify_track_id: str,
+    market: str,
+) -> tuple[bool, int, str, dict[str, Any]]:
+    with httpx.Client(timeout=30.0) as client:
+        response = client.get(
+            f"https://api.spotify.com/v1/tracks/{spotify_track_id}",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"market": market},
+        )
+    try:
+        body = response.json()
+        body_payload = body if isinstance(body, dict) else {}
+    except ValueError:
+        body_payload = {}
+    status_code = int(response.status_code)
+    if status_code == 200:
+        return True, status_code, "Catalog access succeeded.", body_payload
+    error_message = ""
+    error_payload = body_payload.get("error")
+    if isinstance(error_payload, dict):
+        error_message = str(error_payload.get("message") or "")
+    if not error_message:
+        error_message = f"Spotify catalog request failed with status {status_code}."
+    return False, status_code, error_message, body_payload
+
+
+def _spotify_catalog_probe_tracks_batch_request(
+    *,
+    access_token: str,
+    spotify_track_ids: list[str],
+    market: str,
+) -> tuple[bool, int, str, dict[str, Any]]:
+    with httpx.Client(timeout=30.0) as client:
+        response = client.get(
+            "https://api.spotify.com/v1/tracks",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"ids": ",".join(spotify_track_ids), "market": market},
+        )
+    try:
+        body = response.json()
+        body_payload = body if isinstance(body, dict) else {}
+    except ValueError:
+        body_payload = {}
+    status_code = int(response.status_code)
+    if status_code == 200:
+        return True, status_code, "Catalog batch access succeeded.", body_payload
+    error_message = ""
+    error_payload = body_payload.get("error")
+    if isinstance(error_payload, dict):
+        error_message = str(error_payload.get("message") or "")
+    if not error_message:
+        error_message = f"Spotify catalog batch request failed with status {status_code}."
+    return False, status_code, error_message, body_payload
+
+
+@app.post("/debug/spotify/catalog-access-probe")
+async def debug_spotify_catalog_access_probe(
+    request: Request,
+    payload: Any = Body(None),
+) -> Any:
+    try:
+        user_id = _require_local_data_session(request)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_401_UNAUTHORIZED:
+            return _spotify_unauthenticated_response()
+        raise
+
+    body = payload if isinstance(payload, dict) else {}
+    mode = str(body.get("mode", "single") or "single").strip().lower()
+    market = str(body.get("market", "US") or "US").strip() or "US"
+    limit = max(1, min(int(body.get("limit", 5)), 50))
+    spotify_track_id = str(body.get("spotify_track_id") or "").strip()
+    if mode not in {"single", "batch"}:
+        mode = "single"
+
+    try:
+        token_row = refresh_access_token_if_needed(user_id)
+    except SpotifyTokenStoreError:
+        return _spotify_unauthenticated_response()
+    access_token = str(token_row.get("access_token") or "")
+    if not access_token:
+        return _spotify_unauthenticated_response()
+
+    if mode == "batch":
+        track_ids = discover_known_spotify_track_ids(limit=limit, offset=0)
+        if spotify_track_id:
+            track_ids = [spotify_track_id, *[track_id for track_id in track_ids if track_id != spotify_track_id]]
+            track_ids = track_ids[:limit]
+        if not track_ids:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={
+                    "ok": False,
+                    "spotify_track_id": "",
+                    "market": market,
+                    "status": 404,
+                    "message": "No known Spotify track IDs found for batch probe.",
+                    "body": {},
+                    "ids_count": 0,
+                    "ids_sample": [],
+                },
+            )
+        ok, status_code, message, body_payload = _spotify_catalog_probe_tracks_batch_request(
+            access_token=access_token,
+            spotify_track_ids=track_ids,
+            market=market,
+        )
+        return {
+            "ok": ok,
+            "spotify_track_id": "",
+            "market": market,
+            "status": status_code,
+            "message": message,
+            "body": body_payload if isinstance(body_payload, dict) else {},
+            "ids_count": len(track_ids),
+            "ids_sample": track_ids[: min(5, len(track_ids))],
+        }
+
+    if not spotify_track_id:
+        discovered = discover_known_spotify_track_id(offset=0)
+        spotify_track_id = str(discovered or "").strip()
+    if not spotify_track_id:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={
+                "ok": False,
+                "spotify_track_id": "",
+                "market": market,
+                "status": 404,
+                "message": "No known Spotify track ID found for probe.",
+                "body": {},
+            },
+        )
+    ok, status_code, message, body_payload = _spotify_catalog_probe_track_request(
+        access_token=access_token,
+        spotify_track_id=spotify_track_id,
+        market=market,
     )
     return {
-        "limit": max(1, min(int(limit), 500)),
-        "recent_window_days": max(0, int(recent_window_days)),
-        "source_filter": source_filter if source_filter in {"all", "recent", "history", "both"} else "all",
-        "returned_items": len(result["items"]),
-        "excluded_unknown_identity_count": result["excluded_unknown_identity_count"],
-        "items": result["items"],
+        "ok": ok,
+        "spotify_track_id": spotify_track_id,
+        "market": market,
+        "status": status_code,
+        "message": message,
+        "body": body_payload if isinstance(body_payload, dict) else {},
     }
 
 
@@ -4128,12 +4742,7 @@ async def debug_listening_log(
     offset: int = 0,
     source_filter: str = "all",
 ) -> dict[str, Any]:
-    user_id = _session_user_id(request) or _restore_session_user_from_token_store(request)
-    if not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated with Spotify.",
-        )
+    _require_local_data_session(request)
     payload = query_listening_log(
         limit=limit,
         offset=offset,
